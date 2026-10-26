@@ -8,9 +8,7 @@ Home Assistant talks to the charger directly over BLE (via a built-in or USB
 Bluetooth adapter, or an [ESPHome Bluetooth proxy](https://esphome.io/components/bluetooth_proxy.html))
 using the charger's native "BAPI" protocol.
 
-> **Status: early release (0.1.x).** Reverse-engineered and tested against a
-> Wallbox Pulsar Plus. It works well for the author, but it is not an official
-> Wallbox product. Behaviour may vary across firmware versions and Wallbox
+> **Behaviour may vary across firmware versions and Wallbox
 > models. Use at your own risk — see [Limitations](#limitations).
 
 ---
