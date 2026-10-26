@@ -332,6 +332,7 @@ Released under the [MIT License](LICENSE).
 
 ## Disclaimer
 
-This is an independent, community project. "Wallbox" and "Pulsar" are trademarks
-of their respective owners. Use of this software is at your own risk; the authors
+This is an independent, community project, built with heavy use of AI-assisted
+development and reverse engineering. "Wallbox" and "Pulsar" are trademarks of
+their respective owners. Use of this software is at your own risk; the authors
 accept no liability for any damage to your charger, vehicle, or property.
