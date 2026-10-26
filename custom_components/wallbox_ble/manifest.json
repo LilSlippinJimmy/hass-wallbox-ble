@@ -6,7 +6,6 @@
       "service_uuid": "331a36f5-2459-45ea-9d95-6142f0c4b307"
     }
   ],
-  "categories": ["energy.ev_charging"],
   "codeowners": ["@LilSlippinJimmy"],
   "config_flow": true,
   "dependencies": ["bluetooth"],
