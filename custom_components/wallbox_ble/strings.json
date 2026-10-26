@@ -1,0 +1,37 @@
+{
+  "config": {
+    "flow_title": "{name}",
+    "step": {
+      "user": {
+        "title": "Add Wallbox charger",
+        "description": "Pick the Wallbox charger to control over Bluetooth. Make sure the Wallbox phone app's Bluetooth is disconnected (the charger allows only one BLE connection at a time).",
+        "data": {
+          "address": "Charger",
+          "pin": "BLE PIN (only if set in the Wallbox app)"
+        }
+      },
+      "confirm": {
+        "title": "Add {name}",
+        "description": "Add the Wallbox charger {name}? If you set a BLE PIN in the Wallbox app, enter it below; otherwise leave it blank.",
+        "data": {
+          "pin": "BLE PIN (optional)"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "This charger is already configured.",
+      "no_devices_found": "No Wallbox chargers were found over Bluetooth. Make sure the charger is in range and the phone app's Bluetooth is disconnected."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Wallbox BLE options",
+        "description": "How often to poll the charger over Bluetooth. Lower is more responsive but adds BLE traffic; 15s is a good default.",
+        "data": {
+          "scan_interval": "Poll interval (seconds)"
+        }
+      }
+    }
+  }
+}

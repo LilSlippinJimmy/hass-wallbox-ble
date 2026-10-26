@@ -1,0 +1,112 @@
+probe:
+  name: Probe
+  description: >-
+    Connect to the Wallbox over BLE and read status/schedules, logging the
+    results. With no fields it runs the default read-only set. Optionally
+    call ONE specific BAPI method (with an optional raw JSON parameter) for
+    discovery/diagnostics. WARNING: a custom method may change charger state.
+  fields:
+    method:
+      name: Method
+      description: >-
+        BAPI method to call (e.g. "r_schs" to read, "clr_sch" to test
+        schedule deletion). Leave blank to run the default read-only set.
+      required: false
+      example: clr_sch
+      selector:
+        text:
+    par:
+      name: Parameter (raw JSON)
+      description: >-
+        Raw JSON parameter fragment sent verbatim, e.g. null, "1", 1,
+        {"sid":1}. Defaults to null. Only used when a method is given.
+      required: false
+      example: "null"
+      selector:
+        text:
+
+set_schedule:
+  name: Set schedule
+  description: >-
+    Write a single charging schedule to the charger over BLE (replaces the
+    existing schedule slot). Times are HHMM.
+  fields:
+    start:
+      name: Start
+      description: Start time as HHMM (e.g. "0200").
+      required: true
+      example: "0200"
+      selector:
+        text:
+    stop:
+      name: Stop
+      description: Stop time as HHMM (e.g. "0230").
+      required: true
+      example: "0230"
+      selector:
+        text:
+    sid:
+      name: Schedule slot
+      description: Which schedule slot to write (0-3).
+      required: false
+      default: 0
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 4
+          mode: box
+    days:
+      name: Days bitmask
+      description: >-
+        Days bitmask (127 = all 7 days). Bit per day as the charger encodes it.
+      required: false
+      default: 127
+      example: 127
+      selector:
+        number:
+          min: 0
+          max: 127
+          mode: box
+    max_current:
+      name: Max current
+      description: Max charging current in amps for this schedule.
+      required: false
+      example: 32
+      selector:
+        number:
+          min: 6
+          max: 32
+          unit_of_measurement: "A"
+    timezone:
+      name: Timezone
+      description: >-
+        How to interpret start/stop. "local" (default) converts local
+        wall-clock time to the UTC the charger stores. "utc" sends as-is.
+      required: false
+      default: local
+      example: local
+      selector:
+        select:
+          options:
+            - "local"
+            - "utc"
+
+delete_schedule:
+  name: Delete schedule
+  description: >-
+    Delete a charging schedule slot over BLE. This firmware has no native
+    per-slot delete command, so the integration rewrites the schedule table
+    with the chosen slot removed and the remaining schedules compacted down
+    (the same net effect the Wallbox app achieves).
+  fields:
+    sid:
+      name: Schedule slot
+      description: Which schedule slot to delete (0-4).
+      required: true
+      example: 1
+      selector:
+        number:
+          min: 0
+          max: 4
+          mode: box
