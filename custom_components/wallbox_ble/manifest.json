@@ -1,18 +1,18 @@
 {
   "domain": "wallbox_ble",
   "name": "Wallbox BLE (Local)",
-  "codeowners": ["@LilSlippinJimmy"],
-  "config_flow": true,
-  "dependencies": ["bluetooth"],
-  "documentation": "https://github.com/LilSlippinJimmy/hass-wallbox-ble",
-  "issue_tracker": "https://github.com/LilSlippinJimmy/hass-wallbox-ble/issues",
-  "integration_type": "device",
-  "iot_class": "local_polling",
-  "requirements": ["bleak-retry-connector>=3.4.0"],
-  "version": "0.1.0",
   "bluetooth": [
     {
       "service_uuid": "331a36f5-2459-45ea-9d95-6142f0c4b307"
     }
-  ]
+  ],
+  "codeowners": ["@LilSlippinJimmy"],
+  "config_flow": true,
+  "dependencies": ["bluetooth"],
+  "documentation": "https://github.com/LilSlippinJimmy/hass-wallbox-ble",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/LilSlippinJimmy/hass-wallbox-ble/issues",
+  "requirements": ["bleak-retry-connector>=3.4.0"],
+  "version": "0.2.0"
 }

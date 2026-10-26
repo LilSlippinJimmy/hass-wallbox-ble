@@ -23,13 +23,23 @@ using the charger's native "BAPI" protocol.
 - **Resilient connection** — a persistent background connection with
   event-driven drop detection and exponential back-off, so a dropped link
   recovers on its own instead of going permanently unavailable.
-- **Sensors** — status, charge power, charging current, max available current,
-  schedule count, and per-slot schedule details.
-- **Charging switch** — start/stop charging.
+- **Status & power sensors** — charger state, charge power, charging/available
+  current.
+- **Session sensors** — live session energy, power, duration, grid/green
+  energy, plus last-session energy.
+- **Charging / Plugged-in binary sensors** — read-only state (see
+  [OCPP](#ocpp-controlled-chargers)).
+- **Max charging current** — settable via a number entity.
 - **Editable schedules** — per-slot start/stop time pickers.
 - **Schedule delete** — per-slot delete buttons and a service (see
   [How schedule delete works](#how-schedule-delete-works)).
-- **Configurable poll interval** via the integration's *Configure* dialog.
+- **Reboot button** — restart the charger over BLE.
+- **LED halo control** — toggle the standby ring light and set its brightness.
+- **Diagnostics** — firmware build, MAC, serial, timezone, and OCPP-enabled status.
+- **OCPP-aware** — detects OCPP control and keeps charging/lock read-only when
+  the backend owns them (see [OCPP-controlled chargers](#ocpp-controlled-chargers)).
+- **Configurable poll interval** via the integration's *Configure* dialog (see
+  [Polling & update timing](#polling--update-timing)).
 
 ---
 
@@ -100,19 +110,97 @@ A longer interval is gentler on a marginal BLE link.
 
 ## Entities
 
-| Entity | Type | Description |
-| --- | --- | --- |
-| Status | sensor | Human-readable charger state (Ready, Charging, Connected, Locked, Paused, Error, …). Attributes expose the raw status/lock codes. |
-| Charge Power | sensor | Instantaneous charging power (kW). |
-| Charging Current | sensor | Charging current setpoint (A). |
-| Max Available Current | sensor | Maximum available current (A). |
-| Schedules | sensor | Number of schedules configured; all slots exposed as attributes. |
-| Schedule 0–3 | sensor | Per-slot window `HH:MM-HH:MM` (or `none`), with full fields in attributes. |
-| Charging | switch | Start/stop charging. |
-| Schedule 0–3 Start / Stop | time | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). |
-| Delete Schedule 0–3 | button | Delete that schedule slot (only available when the slot is in use). |
+The **Refresh** column shows how each entity's value is kept up to date:
+
+- **poll** — re-read from the charger every poll cycle (the interval you set in
+  the integration's *Configure* dialog; default 15 s). See
+  [Polling & update timing](#polling--update-timing).
+- **static** — read **once** when the integration loads, then cached. These
+  values don't change at runtime; reload the integration (or restart Home
+  Assistant) to refresh them (e.g. after a firmware update).
+- **on action** — updates immediately after you use the related control.
+
+| Entity | Type | Refresh | Description |
+| --- | --- | --- | --- |
+| Status | sensor | poll | Human-readable charger state (Ready, Charging, Connected, Locked, Paused, Error, …). Attributes expose the raw status/lock codes. |
+| Charge Power | sensor | poll | Instantaneous charging power (kW), from `r_dat`. |
+| Charging Current | sensor | poll | Charging current setpoint (A). |
+| Max Available Current | sensor | poll | Maximum available current the charger will allow (A). |
+| Session Energy | sensor | poll | Energy delivered in the current charging session (kWh). |
+| Session Power | sensor | poll | Live charging power for the session (kW). |
+| Session Duration | sensor | poll | Elapsed charging time this session (s). |
+| Session Grid Energy | sensor | poll | Grid energy used this session (kWh). |
+| Session Green Energy | sensor | poll | Green/solar energy used this session (kWh). |
+| Last Session Energy | sensor | poll | Energy of the last completed session (Wh). |
+| Lock Status | sensor | poll | `locked` / `unlocked`, from `r_lck` (read-only — see [OCPP](#ocpp-controlled-chargers)). |
+| Battery | sensor | poll | Vehicle state-of-charge (%). Only populated if your EV reports SoC to the charger; otherwise unavailable. |
+| Schedules | sensor | poll | Number of schedules configured; all slots exposed as attributes. |
+| Schedule 0–3 | sensor | poll | Per-slot window `HH:MM-HH:MM` (or `none`), with full fields in attributes. |
+| Charging | binary_sensor | poll | On when the charger is actively charging (read-only — see [OCPP](#ocpp-controlled-chargers)). |
+| Plugged In | binary_sensor | poll | On when a vehicle is connected (status is not Locked). |
+| OCPP Enabled | binary_sensor | static | On when the charger is managed by an OCPP backend. |
+| Firmware Build | sensor | static | Charger firmware build number (diagnostic). Over BLE the charger reports the internal build number (e.g. `181`), not the dotted version (e.g. `6.7.43`) the app shows — that dotted version is cloud-only. |
+| WLAN MAC | sensor | static | Charger Wi‑Fi MAC (diagnostic, disabled by default). |
+| Serial Number | sensor | static | Charger serial (diagnostic, disabled by default). |
+| Timezone | sensor | static | Charger timezone, e.g. `Europe/London` (diagnostic). |
+| Halo Standby Light | switch | on action | Turn the LED ring standby light on/off. |
+| Halo Brightness | number | on action | LED ring standby brightness (0–100%). |
+| Max Charging Current | number | on action | Set the max charging current (A). Read back after writing (see [OCPP](#ocpp-controlled-chargers)). |
+| Schedule 0–3 Start / Stop | time | poll / on action | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). |
+| Delete Schedule 0–3 | button | — | Delete that schedule slot (only available when the slot is in use). |
+| Reboot | button | — | Reboot the charger. |
 
 > "Locked" status means no car is plugged in.
+
+---
+
+## Polling & update timing
+
+The integration holds **one persistent BLE connection** and reads the charger
+on a fixed interval. You can change this interval in the integration's
+**Configure** dialog (**Settings → Devices & Services → Wallbox BLE (Local) →
+Configure**): the **poll interval**, default **15 seconds**, range **10–120 s**.
+
+**What the poll interval affects.** Every entity marked **poll** in the table
+above is re-read each cycle, so the poll interval is how quickly those values
+update in Home Assistant. A shorter interval = fresher data but more BLE
+traffic; a longer interval = gentler on a weak/contended link. If your charger
+is far from the adapter (low RSSI) or the Wallbox app is often connected,
+prefer a longer interval.
+
+**What the poll interval does NOT affect:**
+
+- **static** entities (OCPP Enabled, Firmware, MAC, Serial) are read once at
+  startup and never re-polled. Changing the poll interval does nothing to them.
+  Reload the integration or restart Home Assistant to refresh them.
+- **on action / button** entities (Max Charging Current, schedule edits/delete,
+  Reboot) act when you use them and read back immediately — they don't wait for
+  the next poll.
+
+Why static values are read once: firmware version, MAC, serial and the OCPP
+flag don't change while the charger runs, so re-reading them every cycle would
+add Bluetooth traffic for no benefit. Reading them a single time keeps each poll
+light — important given the charger allows only one BLE connection at a time.
+
+---
+
+## OCPP-controlled chargers
+
+If your charger is managed by an **OCPP** backend (for example Octopus
+Intelligent, Ohme, or another smart-charging provider), charging is controlled
+remotely by that backend. The **OCPP Enabled** binary sensor tells you whether
+this is the case.
+
+When OCPP is enabled:
+
+- **Charging state is read-only.** You can't reliably force a charge on/off
+  locally — the backend decides. That's why "Charging" is a sensor, not a
+  switch.
+- **Lock is read-only.** Lock status is shown, but local lock/unlock is not
+  exposed because the firmware rejects or overrides it under OCPP.
+- **Max Charging Current can be overridden.** You can set it, and it's written
+  and read back, but the OCPP backend may change it again during a session.
+- **Reboot still works** — it isn't gated by OCPP.
 
 ---
 
@@ -196,6 +284,14 @@ app renumbers.
   interval and/or an ESPHome Bluetooth proxy near the charger.
 - **No native schedule delete on some firmware** — emulated via compaction (see
   above).
+- **Not available over Bluetooth (so not provided):** some values the Wallbox
+  app shows come from the Wallbox **cloud**, not the charger's BLE interface, so
+  a local integration cannot read them:
+  - **Energy price / tariff** — set in the app but stored in your Wallbox cloud
+    account, not served over BLE.
+  - **Added range** — derived from vehicle efficiency; not a charger value.
+  - **Dotted software version** (e.g. `6.7.43`) — cloud-only; over BLE the
+    charger reports only the firmware build number (see *Firmware Build*).
 
 ---
 

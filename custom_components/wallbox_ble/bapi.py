@@ -27,10 +27,35 @@ MET_GET_REALTIME = "r_sta"    # realtime status (detailed, lock, phases)
 MET_GET_SCHEDULES = "r_schs"  # all schedules
 MET_GET_SERIAL = "r_sn_"      # serial number
 MET_GET_LOCK_STATE = "r_lck"  # 0=unlocked, 1=locked
+MET_GET_LIVE_SESSION = "r_lse"  # live session: charged_energy(kWh),
+                                # charging_power(kW), charging_time(s),
+                                # grid_energy, green_energy, control_mode, ...
+MET_GET_SESSION_LOG = "r_log"   # last completed session: tot/en (Wh), sec, ...
+MET_GET_MAX_AVAILABLE = "r_fsI"  # max available current (A), plain int
+MET_GET_FW_VERSION = "fw_v_"     # firmware BUILD number (int, e.g. 181).
+                                 # The protocol defines a fuller response
+                                 # ({db, r=firmware, s=software "6.7.43", ...})
+                                 # but on tested Pulsar Plus firmware the BLE
+                                 # reply is just the build int; the dotted
+                                 # software version is cloud-only.
+MET_GET_MAC = "g_mac"            # {eth_mac, wlan_mac}
+MET_GET_OCPP = "g_ocpp"          # {chid, e, pw, u} — e=1 means OCPP enabled.
+                                 # WARNING: pw/u/chid are SECRETS; never surface
+                                 # them as entities. Only the `e` flag is used.
+MET_GET_AUTOLOCK = "g_alo"       # auto-lock config (int on this firmware)
+MET_GET_TIMEZONE = "g_tzn"       # {timezone: "<tz string>"}
+MET_GET_HALO = "g_halocfg"       # LED halo standby: {mode, time_s, bright}
+                                 # mode 0=off/1=on, bright 0-100, time_s seconds
+
+# Write methods for optional config.
+MET_SET_HALO = "s_halocfg"       # set LED halo: {mode, time_s, bright}
+                                 # Must send ALL three fields; read-modify-write
+                                 # to preserve the ones not being changed.
 
 # Write methods (state-changing).
 MET_START_STOP = "w_cha"      # start/stop/pause/resume charging
-MET_SET_CURRENT = "w_mxI"     # set max charging current
+MET_SET_CURRENT = "w_mxI"     # set max charging current (plain int amps)
+MET_REBOOT = "rebot"          # reboot the charger
 MET_SET_ADV_SCHED = "s_sch"   # advanced schedule write — NOT supported on this
                               # firmware ("No dispatch method found").
 MET_SET_SCHED = "w_sch"       # packed schedule write (THIS firmware).
