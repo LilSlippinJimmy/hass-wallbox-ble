@@ -19,7 +19,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
-from .coordinator import WallboxBleCoordinator, status_label
+from .coordinator import WallboxBleCoordinator, ocpp_status_label, status_label
 from .entity import WallboxBleEntity
 
 
@@ -38,6 +38,7 @@ async def async_setup_entry(
         WallboxScheduleCountSensor(coordinator),
         WallboxLockStatusSensor(coordinator),
         WallboxBatterySensor(coordinator),
+        WallboxOcppStatusSensor(coordinator),
         # Live session.
         WallboxSessionEnergySensor(coordinator),
         WallboxSessionPowerSensor(coordinator),
@@ -424,3 +425,28 @@ class WallboxBatterySensor(WallboxBleEntity, SensorEntity):
         if soc in (None, 0):
             return None
         return soc
+
+
+class WallboxOcppStatusSensor(WallboxBleEntity, SensorEntity):
+    """OCPP backend connection status (r_dat.ocpp, falls back to
+    r_sta.ocpp_status).
+
+    This is the live connection state to the OCPP backend (e.g. Octopus
+    Intelligent): Connected, Not activated, Connection error, etc. It's
+    distinct from the static 'OCPP Enabled' binary sensor, which only reports
+    whether OCPP is configured at all.
+    """
+
+    _attr_name = "OCPP Status"
+    _attr_icon = "mdi:cloud-check-variant"
+
+    def __init__(self, coordinator: WallboxBleCoordinator) -> None:
+        super().__init__(coordinator, "ocpp_status")
+
+    @property
+    def native_value(self):
+        data = self.coordinator.data or {}
+        code = (data.get("status") or {}).get("ocpp")
+        if code is None:
+            code = (data.get("realtime") or {}).get("ocpp_status")
+        return ocpp_status_label(code)

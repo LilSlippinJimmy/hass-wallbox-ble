@@ -4,6 +4,18 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.3]
+
+### Added
+- **OCPP Status** sensor — live OCPP backend connection state (Connected, Not
+  activated, Connection error, Connection rejected, …) from `r_dat.ocpp` /
+  `r_sta.ocpp_status`. Complements the static **OCPP Enabled** binary sensor.
+
+### Docs
+- README: guidance to remove the charger from your phone's Bluetooth list so
+  the Wallbox app falls back to cloud and stops contending for the single BLE
+  link.
+
 ## [0.2.2]
 
 ### Fixed

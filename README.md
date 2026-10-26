@@ -156,6 +156,7 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Charging | binary_sensor | poll | On when the charger is actively charging (read-only — see [OCPP](#ocpp-controlled-chargers)). |
 | Plugged In | binary_sensor | poll | On when a vehicle is connected (status is not Locked). |
 | OCPP Enabled | binary_sensor | static | On when the charger is managed by an OCPP backend. |
+| OCPP Status | sensor | poll | Live OCPP backend connection state: Connected, Not activated, Connection error, Connection rejected, etc. |
 | Firmware Build | sensor | static | Charger firmware build number (diagnostic). Over BLE the charger reports the internal build number (e.g. `181`), not the dotted version (e.g. `6.7.43`) the app shows — that dotted version is cloud-only. |
 | WLAN MAC | sensor | static | Charger Wi‑Fi MAC (diagnostic, disabled by default). |
 | Serial Number | sensor | static | Charger serial (diagnostic, disabled by default). |

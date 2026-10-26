@@ -45,6 +45,28 @@ def status_label(code) -> str | None:
         return f"Unknown ({code})" if code is not None else None
 
 
+# OCPP backend connection state, from r_dat.ocpp / r_sta.ocpp_status.
+# Values verified from the Wallbox app (enum l41.d2). This is the live
+# connection status to the OCPP backend (e.g. Octopus), distinct from the
+# static "OCPP enabled" config flag (g_ocpp.e).
+OCPP_STATUS_CODES = {
+    0: "Not activated",
+    1: "Not configured",
+    2: "Connection error",
+    3: "Connection rejected",
+    4: "Connected",            # app label: connection_accepted
+    6: "Certificate validation failed",
+}
+
+
+def ocpp_status_label(code) -> str | None:
+    """Map a numeric OCPP status code to a human label."""
+    try:
+        return OCPP_STATUS_CODES.get(int(code), f"Unknown ({code})")
+    except (ValueError, TypeError):
+        return None
+
+
 def _clean4(hhmm) -> str:
     """Normalise a time to a 4-digit HHMM string."""
     s = str(hhmm).strip().strip("\"'").replace(":", "")
