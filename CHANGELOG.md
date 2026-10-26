@@ -4,6 +4,34 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0]
+
+### Added
+- Live **session** sensors: energy, power, duration, grid energy, green energy.
+- **Last session energy** sensor.
+- **Lock Status** sensor (read-only).
+- **Plugged In** and **OCPP Enabled** binary sensors.
+- **Max Charging Current** number entity (write via `w_mxI`, read back).
+- **Reboot** button (`rebot`).
+- **LED halo standby** controls: **Halo Standby Light** switch and **Halo
+  Brightness** number (`g_halocfg`/`s_halocfg`, read-modify-write).
+- **Timezone** diagnostic sensor (`g_tzn`).
+- **Battery** sensor — vehicle state-of-charge (%) from `r_lse.soc`, shown only
+  when the EV reports SoC to the charger.
+- Diagnostic sensors: **Firmware Build**, **WLAN MAC**, **Serial Number**
+  (read once at startup). Firmware Build is the internal build number reported
+  over BLE (e.g. 181); the dotted app version (e.g. 6.7.43) is cloud-only.
+- OCPP awareness: documented which controls the OCPP backend owns; charging and
+  lock are kept read-only under OCPP.
+
+### Changed
+- **BREAKING:** the **Charging** control is now a read-only `binary_sensor`
+  instead of a `switch`. Under OCPP you cannot reliably force a charge locally,
+  so it only reflects state. Remove any automations that called
+  `switch.turn_on/off` on the old charging switch.
+- Static info (firmware, MAC, OCPP flag, serial) is read once at startup rather
+  than every poll, to keep the BLE link light.
+
 ## [0.1.0] - Initial public release
 
 ### Added

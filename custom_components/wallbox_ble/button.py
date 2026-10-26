@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import logging
 
-from homeassistant.components.button import ButtonEntity
+from homeassistant.components.button import ButtonEntity, ButtonDeviceClass
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -30,11 +31,13 @@ async def async_setup_entry(
     entry: ConfigEntry,
     async_add_entities: AddEntitiesCallback,
 ) -> None:
-    """Set up per-slot delete buttons."""
+    """Set up per-slot delete buttons and the reboot button."""
     coordinator: WallboxBleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities(
+    entities: list[ButtonEntity] = [
         WallboxDeleteScheduleButton(coordinator, sid) for sid in range(NUM_SLOTS)
-    )
+    ]
+    entities.append(WallboxRebootButton(coordinator))
+    async_add_entities(entities)
 
 
 class WallboxDeleteScheduleButton(WallboxBleEntity, ButtonEntity):
@@ -62,3 +65,19 @@ class WallboxDeleteScheduleButton(WallboxBleEntity, ButtonEntity):
     async def async_press(self) -> None:
         _LOGGER.debug("Delete button pressed for schedule slot %s", self._sid)
         await self.coordinator.async_delete_schedule(self._sid)
+
+
+class WallboxRebootButton(WallboxBleEntity, ButtonEntity):
+    """Reboots the charger (rebot). Not gated by OCPP."""
+
+    _attr_name = "Reboot"
+    _attr_icon = "mdi:restart"
+    _attr_device_class = ButtonDeviceClass.RESTART
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(self, coordinator: WallboxBleCoordinator) -> None:
+        super().__init__(coordinator, "reboot")
+
+    async def async_press(self) -> None:
+        _LOGGER.debug("Reboot button pressed")
+        await self.coordinator.async_reboot()

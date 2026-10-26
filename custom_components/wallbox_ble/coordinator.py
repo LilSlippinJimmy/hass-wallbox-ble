@@ -78,6 +78,12 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         # instead of blanking every entity to "unavailable" on one miss.
         self._consecutive_failures = 0
         self._max_tolerated_failures = 3
+        # Static info (firmware, MAC, OCPP flag, serial) is read ONCE, the
+        # first time the link is ready, then cached and merged into every
+        # poll's data. These values don't change at runtime, so re-reading
+        # them every cycle would just add BLE traffic for nothing.
+        self._static: dict = {}
+        self._static_fetched = False
 
     @property
     def address(self) -> str:
@@ -87,28 +93,90 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         """Start the client's persistent connection task (idempotent)."""
         self._client.start()
 
+    async def _fetch_static(self) -> None:
+        """Read the static/rarely-changing info ONCE and cache it.
+
+        firmware version, MAC, OCPP-enabled flag and serial never change at
+        runtime, so they are read a single time (the first poll where the link
+        is ready) rather than every cycle. A reload/restart re-reads them
+        (e.g. after a firmware update). Only the OCPP `e` flag is kept — the
+        OCPP URL/password/chargepoint-id are secrets and are discarded here.
+        """
+        static: dict = {}
+
+        serial = await self._client.request(bapi.MET_GET_SERIAL)
+        if isinstance(serial, str):
+            static["serial"] = serial
+
+        fw = await self._client.request(bapi.MET_GET_FW_VERSION)
+        if fw is not None:
+            static["fw_version"] = fw
+
+        mac = await self._client.request(bapi.MET_GET_MAC)
+        if isinstance(mac, dict):
+            static["wlan_mac"] = mac.get("wlan_mac")
+
+        ocpp = await self._client.request(bapi.MET_GET_OCPP)
+        if isinstance(ocpp, dict):
+            # Keep ONLY the enabled flag. Never store chid/pw/u (secrets).
+            static["ocpp_enabled"] = bool(ocpp.get("e"))
+
+        tzinfo = await self._client.request(bapi.MET_GET_TIMEZONE)
+        if isinstance(tzinfo, dict):
+            static["timezone"] = tzinfo.get("timezone")
+
+        halo = await self._client.request(bapi.MET_GET_HALO)
+        if isinstance(halo, dict):
+            static["halo"] = halo
+
+        if static:
+            self._static = static
+            self._static_fetched = True
+            _LOGGER.debug("Fetched static Wallbox info: %s", list(static))
+
     async def _poll_once(self) -> dict | None:
         """One poll attempt. Returns the data dict, or None if the link isn't
         ready / the charger didn't answer. Serialisation lives in the client."""
         if not self._client.ready:
             return None
 
+        # One-time static reads (firmware/MAC/OCPP/serial).
+        if not self._static_fetched:
+            await self._fetch_static()
+
         status = await self._client.request(bapi.MET_GET_STATUS)        # r_dat
         realtime = await self._client.request(bapi.MET_GET_REALTIME)    # r_sta
         schedules = await self._client.request(bapi.MET_GET_SCHEDULES)  # r_schs
-        if not (self.data or {}).get("serial"):
-            serial = await self._client.request(bapi.MET_GET_SERIAL)    # r_sn_
-        else:
-            serial = self.data.get("serial")
+        session = await self._client.request(bapi.MET_GET_LIVE_SESSION)  # r_lse
+        last = await self._client.request(bapi.MET_GET_SESSION_LOG)     # r_log
+        lock = await self._client.request(bapi.MET_GET_LOCK_STATE)      # r_lck
 
         if status is None and realtime is None:
             return None
+
+        serial = self._static.get("serial") or (self.data or {}).get("serial")
+
+        session_data = session if isinstance(session, dict) else {}
+        # Fold the last completed session's energy (r_log.tot, in Wh) into the
+        # session dict so the "Last Session Energy" sensor can read it.
+        if isinstance(last, dict) and last.get("tot") is not None:
+            session_data = dict(session_data)
+            session_data["last_session_wh"] = last.get("tot")
 
         return {
             "status": status or {},
             "realtime": realtime or {},
             "schedules": (schedules or {}).get("schedules", []),
-            "serial": serial if isinstance(serial, str) else (self.data or {}).get("serial"),
+            "session": session_data,
+            "lock": lock,
+            "serial": serial,
+            # Cached static values, merged in every cycle so entities always
+            # have them even though they're only read once.
+            "fw_version": self._static.get("fw_version"),
+            "wlan_mac": self._static.get("wlan_mac"),
+            "ocpp_enabled": self._static.get("ocpp_enabled"),
+            "timezone": self._static.get("timezone"),
+            "halo": self._static.get("halo") or {},
         }
 
     async def _async_update_data(self) -> dict:
@@ -177,6 +245,59 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("%s response=%s", met, result)
         await self.async_request_refresh()
         return result
+
+    async def async_set_max_current(self, amps: int) -> dict | None:
+        """Set the max charging current (amps) via w_mxI.
+
+        The parameter is a plain integer (e.g. 16, 32). NOTE: if the charger is
+        OCPP-controlled, the OCPP backend may override this value during a
+        session — the write is still sent and read back, but the effective
+        limit can change again outside our control.
+        """
+        amps_i = int(amps)
+        _LOGGER.debug("Setting max current w_mxI=%s", amps_i)
+        # w_mxI takes a bare integer parameter.
+        await self._client.request(bapi.MET_SET_CURRENT, str(amps_i))
+        await self.async_request_refresh()
+        return {"ok": True, "amps": amps_i}
+
+    async def async_reboot(self) -> None:
+        """Reboot the charger (rebot). Not gated by OCPP."""
+        _LOGGER.debug("Rebooting charger (rebot)")
+        await self._client.request(bapi.MET_REBOOT)
+
+    async def async_set_halo(
+        self, *, mode: int | None = None, bright: int | None = None,
+        time_s: int | None = None,
+    ) -> dict | None:
+        """Set the LED halo standby config via s_halocfg.
+
+        s_halocfg requires ALL three fields {mode, time_s, bright}, so this is
+        read-modify-write: start from the last-known halo config and override
+        only the field(s) given, so changing brightness doesn't wipe the mode
+        (and vice-versa). Re-reads afterwards to confirm and refresh entities.
+        """
+        import json
+
+        current = dict((self.data or {}).get("halo") or self._static.get("halo") or {})
+        new = {
+            "mode": int(mode if mode is not None else current.get("mode", 1)),
+            "time_s": int(time_s if time_s is not None else current.get("time_s", 10)),
+            "bright": int(bright if bright is not None else current.get("bright", 100)),
+        }
+        par = json.dumps(new, separators=(",", ":"))
+        _LOGGER.debug("Setting halo s_halocfg=%s", par)
+        await self._client.request(bapi.MET_SET_HALO, par)
+
+        # Read back and update cached static + current data so entities reflect it.
+        halo = await self._client.request(bapi.MET_GET_HALO)
+        if isinstance(halo, dict):
+            self._static["halo"] = halo
+            if self.data is not None:
+                nd = dict(self.data)
+                nd["halo"] = halo
+                self.async_set_updated_data(nd)
+        return halo
 
     async def async_set_schedule(
         self,
