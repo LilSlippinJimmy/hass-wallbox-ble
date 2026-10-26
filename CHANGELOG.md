@@ -4,6 +4,13 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1]
+
+### Added
+- In-repo brand assets (`custom_components/wallbox_ble/brand/`) so the HACS
+  brands validation passes.
+- Manifest `categories` (`energy.ev_charging`) for Marketplace classification.
+
 ## [0.2.0]
 
 ### Added
