@@ -49,10 +49,29 @@ using the charger's native "BAPI" protocol.
   - an [ESPHome Bluetooth proxy](https://esphome.io/components/bluetooth_proxy.html)
     placed near the charger.
 - The charger within reliable BLE range. Wallbox chargers allow **only one BLE
-  connection at a time**, so the Wallbox phone app will contend for the link —
-  keep the app closed (or Bluetooth off on the phone) for best reliability.
+  connection at a time** — see
+  [Important: only one Bluetooth connection at a time](#important-only-one-bluetooth-connection-at-a-time)
+  below for how to stop the phone app contending for the link.
 - A Wallbox **Pulsar** or **Pulsar Plus**. Other models may work but are
   untested.
+
+### Important: only one Bluetooth connection at a time
+
+Wallbox chargers accept **only one BLE connection at a time**. If this
+integration is connected, anything else trying to use Bluetooth to the charger
+will contend for that single link — and the usual culprit is the **Wallbox
+phone app**, which prefers Bluetooth when the charger is paired to the phone
+and will repeatedly grab the link.
+
+**Recommended:** once you have the integration working, **remove ("Forget") the
+charger from your phone's Bluetooth list.** With no Bluetooth pairing on the
+phone, the Wallbox app falls back to its **cloud** connection and stops fighting
+Home Assistant for the BLE link. You keep full app functionality over the cloud,
+and Home Assistant gets a stable local connection.
+
+If you don't do this, you may see the integration's entities flap between
+available and unavailable whenever the app connects over Bluetooth (for example
+when you open the app, or when the phone comes into range).
 
 ---
 
