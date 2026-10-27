@@ -23,15 +23,18 @@ _LOGGER = logging.getLogger(__name__)
 NUM_SLOTS = 4
 
 # Days in display order, with each one's Sunday-first bit (the charger's w_sch
-# encoding: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64).
-DAYS: list[tuple[str, int]] = [
-    ("Monday", 2),
-    ("Tuesday", 4),
-    ("Wednesday", 8),
-    ("Thursday", 16),
-    ("Friday", 32),
-    ("Saturday", 64),
-    ("Sunday", 1),
+# encoding: Sun=1, Mon=2, Tue=4, Wed=8, Thu=16, Fri=32, Sat=64) and a 1-7
+# ordinal. The ordinal is included in the entity name ("Schedule 0 — 1 Monday")
+# so Home Assistant's name-alphabetical entity list shows them Mon..Sun rather
+# than alphabetically (Friday, Monday, Saturday, ...).
+DAYS: list[tuple[int, str, int]] = [
+    (1, "Monday", 2),
+    (2, "Tuesday", 4),
+    (3, "Wednesday", 8),
+    (4, "Thursday", 16),
+    (5, "Friday", 32),
+    (6, "Saturday", 64),
+    (7, "Sunday", 1),
 ]
 
 
@@ -44,9 +47,9 @@ async def async_setup_entry(
     coordinator: WallboxBleCoordinator = hass.data[DOMAIN][entry.entry_id]
     entities: list[SwitchEntity] = [WallboxHaloSwitch(coordinator)]
     for sid in range(NUM_SLOTS):
-        for day_name, day_bit in DAYS:
+        for day_num, day_name, day_bit in DAYS:
             entities.append(
-                WallboxScheduleDaySwitch(coordinator, sid, day_name, day_bit)
+                WallboxScheduleDaySwitch(coordinator, sid, day_num, day_name, day_bit)
             )
     async_add_entities(entities)
 
@@ -90,12 +93,16 @@ class WallboxScheduleDaySwitch(WallboxBleEntity, SwitchEntity):
     _attr_entity_category = EntityCategory.CONFIG
 
     def __init__(
-        self, coordinator: WallboxBleCoordinator, sid: int, day_name: str, day_bit: int
+        self, coordinator: WallboxBleCoordinator, sid: int, day_num: int,
+        day_name: str, day_bit: int,
     ) -> None:
         super().__init__(coordinator, f"schedule_{sid}_day_{day_name.lower()}")
         self._sid = sid
         self._day_bit = day_bit
-        self._attr_name = f"Schedule {sid} {day_name}"
+        # Ordinal prefix ("1 Monday" .. "7 Sunday") keeps HA's name-sorted list
+        # in weekday order. unique_id is unchanged (still keyed by day name) so
+        # this rename doesn't create new entities.
+        self._attr_name = f"Schedule {sid} \u2014 {day_num} {day_name}"
 
     def _slot(self) -> dict | None:
         schedules = (self.coordinator.data or {}).get("schedules") or []

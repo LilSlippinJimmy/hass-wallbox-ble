@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.6]
+
+### Changed
+- Per-day schedule switches are now named `Schedule N — 1 Monday` … `7 Sunday`
+  so Home Assistant's name-sorted entity list shows them in weekday order
+  instead of alphabetically (Friday, Monday, Saturday, …). Entity IDs are
+  unchanged.
+
 ## [0.2.5]
 
 ### Added
