@@ -25,7 +25,7 @@ using the charger's native "BAPI" protocol.
   current.
 - **Session sensors** — live session energy, power, duration, grid/green
   energy, plus last-session energy.
-- **Charging / Plugged-in binary sensors** — read-only state (see
+- **Charging binary sensor** — read-only state (see
   [OCPP](#ocpp-controlled-chargers)).
 - **Max charging current** — settable via a number entity.
 - **Editable schedules** — per-slot start/stop time pickers.
@@ -154,7 +154,6 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Schedules | sensor | poll | Number of schedules configured; all slots exposed as attributes. |
 | Schedule 0–3 | sensor | poll | Per-slot window `HH:MM-HH:MM` (or `none`), with full fields in attributes. |
 | Charging | binary_sensor | poll | On when the charger is actively charging (read-only — see [OCPP](#ocpp-controlled-chargers)). |
-| Plugged In | binary_sensor | poll | On when a vehicle is connected (status is not Locked). |
 | OCPP Enabled | binary_sensor | static | On when the charger is managed by an OCPP backend. |
 | OCPP Status | sensor | poll | Live OCPP backend connection state: Connected, Not activated, Connection error, Connection rejected, etc. |
 | Firmware Build | sensor | static | Charger firmware build number (diagnostic). Over BLE the charger reports the internal build number (e.g. `181`), not the dotted version (e.g. `6.7.43`) the app shows — that dotted version is cloud-only. |
@@ -168,8 +167,6 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Schedule 0–3 \<day\> | switch | poll / on action | One switch per day (Monday–Sunday) per slot — toggle which days the schedule runs. Grouped under the device's **Configuration** section. A schedule must keep at least one day on (you can't turn off the last one). Only available once the slot has a time set. |
 | Delete Schedule 0–3 | button | — | Delete that schedule slot (only available when the slot is in use). |
 | Reboot | button | — | Reboot the charger. |
-
-> "Locked" status means no car is plugged in.
 
 ---
 
@@ -304,6 +301,12 @@ app renumbers.
   interval and/or an ESPHome Bluetooth proxy near the charger.
 - **No native schedule delete on some firmware** — emulated via compaction (see
   above).
+- **No "car connected / plugged in" state on OCPP-controlled chargers.**
+  Fine-grained charger state such as "car connected" is only available via the
+  charger's realtime-status (`r_sta`) command, which OCPP-controlled chargers
+  (e.g. Octopus Intelligent) do not answer reliably over Bluetooth. The BLE
+  status read (`r_dat`) is coarse and cannot distinguish a connected car while
+  the charger is OCPP-locked, so no "Plugged In" sensor is provided.
 - **Not available over Bluetooth (so not provided):** some values the Wallbox
   app shows come from the Wallbox **cloud**, not the charger's BLE interface, so
   a local integration cannot read them:

@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.7]
+### Fixed
+- Status and other BLE entities no longer freeze on stale values when a
+  secondary read times out on a marginal Bluetooth link. The poll now treats
+  the core status read (`r_dat`) as the only essential read and makes the
+  remaining reads best-effort, preserving the previous value on failure.
+### Removed
+- The "Plugged In" binary sensor. Over BLE the charger's coarse status
+  (`r_dat`) cannot distinguish a connected car while the charger is
+  OCPP-locked, so the sensor was unreliable on OCPP-controlled chargers
+  (e.g. Octopus). Fine-grained plug state requires the realtime-status
+  (`r_sta`) command, which such chargers do not answer reliably over BLE.
+
 ## [0.2.6]
 
 ### Changed

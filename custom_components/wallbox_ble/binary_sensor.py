@@ -4,9 +4,12 @@ Read-only state entities:
   - Charging   : whether the charger is actively charging (was a switch; under
                  OCPP you cannot reliably force-start locally, so this reflects
                  state only).
-  - Plugged in : whether a vehicle is connected (charger status != Locked).
   - OCPP enabled : whether the charger is managed by an OCPP backend. Static;
                    read once at startup.
+
+Note: plug-state ("car connected") detection is not available over BLE on
+OCPP-controlled chargers — the coarse BLE status can't distinguish a connected
+car while the charger is OCPP-locked, so no "Plugged In" sensor is provided.
 """
 from __future__ import annotations
 
@@ -25,8 +28,6 @@ from .entity import WallboxBleEntity
 
 # r_dat.st / r_sta.charger_status code that means actively charging.
 STATUS_CHARGING = 1
-# Status code that means no vehicle connected.
-STATUS_LOCKED = 6
 
 
 async def async_setup_entry(
@@ -39,7 +40,6 @@ async def async_setup_entry(
     async_add_entities(
         [
             WallboxChargingBinarySensor(coordinator),
-            WallboxPluggedInBinarySensor(coordinator),
             WallboxOcppBinarySensor(coordinator),
         ]
     )
@@ -69,21 +69,6 @@ class WallboxChargingBinarySensor(WallboxBleEntity, BinarySensorEntity):
     def is_on(self) -> bool | None:
         code = _status_code(self.coordinator.data or {})
         return None if code is None else code == STATUS_CHARGING
-
-
-class WallboxPluggedInBinarySensor(WallboxBleEntity, BinarySensorEntity):
-    """On when a vehicle is plugged in (status is not Locked)."""
-
-    _attr_name = "Plugged In"
-    _attr_device_class = BinarySensorDeviceClass.PLUG
-
-    def __init__(self, coordinator: WallboxBleCoordinator) -> None:
-        super().__init__(coordinator, "plugged_in")
-
-    @property
-    def is_on(self) -> bool | None:
-        code = _status_code(self.coordinator.data or {})
-        return None if code is None else code != STATUS_LOCKED
 
 
 class WallboxOcppBinarySensor(WallboxBleEntity, BinarySensorEntity):

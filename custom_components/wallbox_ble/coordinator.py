@@ -166,29 +166,51 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         if not self._static_fetched:
             await self._fetch_static()
 
-        status = await self._client.request(bapi.MET_GET_STATUS)        # r_dat
-        realtime = await self._client.request(bapi.MET_GET_REALTIME)    # r_sta
-        schedules = await self._client.request(bapi.MET_GET_SCHEDULES)  # r_schs
-        session = await self._client.request(bapi.MET_GET_LIVE_SESSION)  # r_lse
-        last = await self._client.request(bapi.MET_GET_SESSION_LOG)     # r_log
-        lock = await self._client.request(bapi.MET_GET_LOCK_STATE)      # r_lck
+        prev = self.data or {}
 
-        if status is None and realtime is None:
+        # r_dat is the ONE essential read — status, power, current, ocpp. If it
+        # succeeds the cycle is a success, even if the optional reads below
+        # fail. This keeps the core status fresh on a marginal/contended link
+        # rather than stalling the whole poll because a secondary read timed out
+        # (the cause of the status-not-syncing regression when the poll grew to
+        # six sequential reads).
+        status = await self._client.request(bapi.MET_GET_STATUS)        # r_dat
+        if status is None:
+            # Core read failed — report a failed cycle so the tolerate/backoff
+            # logic handles it, rather than publishing a half-empty update.
             return None
 
-        serial = self._static.get("serial") or (self.data or {}).get("serial")
+        # Optional reads: best-effort. On failure, keep the previous value for
+        # that datum so one flaky read doesn't blank an entity or fail the poll.
+        schedules_resp = await self._client.request(bapi.MET_GET_SCHEDULES)  # r_schs
+        schedules = (
+            (schedules_resp or {}).get("schedules")
+            if schedules_resp is not None else prev.get("schedules")
+        )
 
-        session_data = session if isinstance(session, dict) else {}
-        # Fold the last completed session's energy (r_log.tot, in Wh) into the
-        # session dict so the "Last Session Energy" sensor can read it.
+        realtime = await self._client.request(bapi.MET_GET_REALTIME)    # r_sta
+        realtime = realtime if realtime is not None else prev.get("realtime")
+
+        session = await self._client.request(bapi.MET_GET_LIVE_SESSION)  # r_lse
+        session_data = dict(session) if isinstance(session, dict) else dict(
+            prev.get("session") or {}
+        )
+
+        last = await self._client.request(bapi.MET_GET_SESSION_LOG)     # r_log
         if isinstance(last, dict) and last.get("tot") is not None:
-            session_data = dict(session_data)
             session_data["last_session_wh"] = last.get("tot")
+        elif "last_session_wh" not in session_data and prev.get("session"):
+            session_data["last_session_wh"] = prev["session"].get("last_session_wh")
+
+        lock = await self._client.request(bapi.MET_GET_LOCK_STATE)      # r_lck
+        lock = lock if lock is not None else prev.get("lock")
+
+        serial = self._static.get("serial") or prev.get("serial")
 
         return {
             "status": status or {},
             "realtime": realtime or {},
-            "schedules": (schedules or {}).get("schedules", []),
+            "schedules": schedules or [],
             "session": session_data,
             "lock": lock,
             "serial": serial,
