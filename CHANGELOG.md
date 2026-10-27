@@ -4,18 +4,26 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [0.2.4]
+## [0.2.5]
 
 ### Added
-- **Schedule Days** select per slot — choose which days a schedule runs (Every
-  day, Weekdays, Weekends, or a single day) instead of always defaulting to
-  every day. Arbitrary combinations remain available via the
-  `wallbox_ble.set_schedule` service's `days` bitmask.
+- **Per-day schedule switches** — one switch per day (Monday–Sunday) for each
+  of the four slots, so you can pick any combination of days. Grouped under the
+  device's Configuration section. A schedule must keep at least one day
+  selected (turning off the last day is refused, matching the Wallbox app).
 
 ### Changed
+- `wallbox_ble.set_schedule`: `days` is now **required** (no "all" default) and
+  accepts a day-name list (`[mon, wed, fri]`), a keyword (`all`/`weekdays`/
+  `weekends`), a comma string, or a bitmask integer. Zero days is rejected.
 - Setting a schedule **start** time on an empty slot now defaults the **stop**
   to start + 1 minute (and setting stop defaults start to stop − 1 minute),
-  instead of a fixed 23:41.
+  instead of a fixed 23:41. A new slot still defaults to all days (refine with
+  the per-day switches).
+
+### Removed
+- The single-select "Schedule Days" entity from 0.2.4, replaced by the per-day
+  switches above.
 
 ## [0.2.3]
 

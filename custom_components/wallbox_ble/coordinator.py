@@ -288,24 +288,37 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Rebooting charger (rebot)")
         await self._client.request(bapi.MET_REBOOT)
 
-    async def async_set_schedule_days(self, sid: int, days_sunfirst: int) -> dict | None:
-        """Change only the active days of an existing schedule slot.
+    async def async_set_schedule_day(
+        self, sid: int, day_bit_sunfirst: int, on: bool
+    ) -> dict | None:
+        """Turn a single day on/off for an existing schedule slot.
 
-        Reads the slot's current start/stop/max-current and rewrites it with
-        the new Sunday-first days bitmask, preserving everything else. If the
-        slot doesn't exist yet there are no times to apply days to, so this is
-        a no-op (set a start/stop first).
+        `day_bit_sunfirst` is the Sunday-first bit for one day (Sun=1, Mon=2,
+        Tue=4, Wed=8, Thu=16, Fri=32, Sat=64). Reads the slot's current
+        days/start/stop/max-current, flips just that bit, and rewrites —
+        preserving everything else. No-op if the slot has no schedule yet
+        (set a start/stop first).
         """
         schedules = (self.data or {}).get("schedules") or []
         slot = next((s for s in schedules if s.get("sid") == int(sid)), None)
         if not slot:
-            _LOGGER.debug("Set days: slot %s has no schedule yet; ignoring", sid)
+            _LOGGER.debug("Set day: slot %s has no schedule yet; ignoring", sid)
             return None
+        cur = int(slot.get("days", 0)) & 0x7F
+        new_days = (cur | day_bit_sunfirst) if on else (cur & ~day_bit_sunfirst)
+        # A schedule must always keep at least one active day (matches the
+        # Wallbox app). Refuse to turn off the last remaining day.
+        if not on and new_days == 0:
+            _LOGGER.warning(
+                "Refusing to clear the last day of schedule slot %s — a schedule "
+                "must have at least one day. Enable another day first.", sid,
+            )
+            return {"ok": False, "reason": "at_least_one_day_required"}
         start = _clean4(slot.get("start"))
         stop = _clean4(slot.get("stop"))
         mcr = slot.get("mcr")
         return await self.async_set_schedule(
-            start, stop, sid=int(sid), days=int(days_sunfirst) & 0x7F,
+            start, stop, sid=int(sid), days=new_days & 0x7F,
             days_are_sunfirst=True, max_current=mcr,
         )
 

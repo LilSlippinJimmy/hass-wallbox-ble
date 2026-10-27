@@ -57,17 +57,17 @@ set_schedule:
           max: 4
           mode: box
     days:
-      name: Days bitmask
+      name: Days
       description: >-
-        Days bitmask (127 = all 7 days). Bit per day as the charger encodes it.
-      required: false
-      default: 127
-      example: 127
+        Which days the schedule runs. Required — there is no default, you must
+        choose at least one day. Accepts a list of day names
+        (e.g. [mon, wed, fri]), a keyword (all, weekdays, weekends), a
+        comma-separated string ("mon,wed,fri"), or a Monday-first bitmask
+        integer for backwards compatibility.
+      required: true
+      example: [mon, wed, fri]
       selector:
-        number:
-          min: 0
-          max: 127
-          mode: box
+        object:
     max_current:
       name: Max current
       description: Max charging current in amps for this schedule.

@@ -17,6 +17,7 @@ import voluptuous as vol
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_ADDRESS, Platform
 from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
@@ -36,7 +37,6 @@ PLATFORMS: list[Platform] = [
     Platform.BINARY_SENSOR,
     Platform.BUTTON,
     Platform.NUMBER,
-    Platform.SELECT,
     Platform.SENSOR,
     Platform.SWITCH,
     Platform.TIME,
@@ -178,12 +178,72 @@ def _local_hhmm_to_utc(hass: HomeAssistant, hhmm: str) -> str:
     return f"{utc_dt.hour:02d}{utc_dt.minute:02d}"
 
 
+# Day name -> Monday-first bit (bit0=Mon .. bit6=Sun), matching the convention
+# async_set_schedule expects when days_are_sunfirst is False. Accepts 3-letter
+# and full names, case-insensitive.
+_DAY_NAME_TO_MONFIRST_BIT = {
+    "mon": 1, "monday": 1,
+    "tue": 2, "tues": 2, "tuesday": 2,
+    "wed": 4, "weds": 4, "wednesday": 4,
+    "thu": 8, "thur": 8, "thurs": 8, "thursday": 8,
+    "fri": 16, "friday": 16,
+    "sat": 32, "saturday": 32,
+    "sun": 64, "sunday": 64,
+}
+_DAY_KEYWORDS = {
+    "all": 127, "everyday": 127, "every_day": 127, "daily": 127,
+    "weekdays": 1 | 2 | 4 | 8 | 16,          # Mon-Fri
+    "weekends": 32 | 64,                       # Sat+Sun
+    "none": 0,
+}
+
+
+def _parse_days(value) -> int:
+    """Parse the service `days` into a Monday-first bitmask (0-127).
+
+    Accepts:
+      - an int already (back-compat: Monday-first bitmask, 0-127),
+      - a keyword string: 'all'/'everyday'/'daily', 'weekdays', 'weekends', 'none',
+      - a comma-separated string of day names: 'mon,wed,fri',
+      - a list of day names/keywords: ['mon','wed','fri'].
+    Raises ValueError on an unknown token.
+    """
+    if isinstance(value, bool):
+        raise ValueError(f"days must not be a boolean: {value!r}")
+    if isinstance(value, int):
+        if not 0 <= value <= 127:
+            raise ValueError(f"days bitmask out of range (0-127): {value}")
+        return value
+    # Normalise to a list of tokens.
+    if isinstance(value, str):
+        tokens = [t.strip().lower() for t in value.split(",") if t.strip()]
+    elif isinstance(value, (list, tuple)):
+        tokens = [str(t).strip().lower() for t in value if str(t).strip()]
+    else:
+        raise ValueError(f"days must be an int, string, or list; got {type(value)}")
+
+    mask = 0
+    for tok in tokens:
+        if tok in _DAY_KEYWORDS:
+            mask |= _DAY_KEYWORDS[tok]
+        elif tok in _DAY_NAME_TO_MONFIRST_BIT:
+            mask |= _DAY_NAME_TO_MONFIRST_BIT[tok]
+        else:
+            raise ValueError(
+                f"unknown day {tok!r} (use mon..sun, or all/weekdays/weekends/none)"
+            )
+    return mask
+
+
 _SET_SCHEDULE_SCHEMA = vol.Schema(
     {
         vol.Required("start"): cv.string,          # "HHMM"
         vol.Required("stop"): cv.string,           # "HHMM"
         vol.Optional("sid", default=0): vol.All(int, vol.Range(min=0, max=4)),
-        vol.Optional("days", default=127): vol.All(int, vol.Range(min=0, max=127)),
+        # Required: the caller must explicitly choose the days (no "all" default).
+        # Accepts an int bitmask (Mon-first), a day-name list, or a keyword
+        # string. Parsed to a Monday-first bitmask by _parse_days.
+        vol.Required("days"): _parse_days,
         vol.Optional("max_current"): vol.All(int, vol.Range(min=6, max=32)),
         vol.Optional("timezone", default="local"): vol.In(["local", "utc"]),
     }
@@ -197,6 +257,12 @@ def _register_schedule_service(hass: HomeAssistant) -> None:
 
     async def _handle_set_schedule(call: ServiceCall) -> None:
         data = _SET_SCHEDULE_SCHEMA(dict(call.data))
+        # A schedule must have at least one active day (matches the Wallbox app).
+        if (int(data["days"]) & 0x7F) == 0:
+            raise HomeAssistantError(
+                "A schedule must have at least one day. Set 'days' to one or more "
+                "days (e.g. [mon, wed, fri]) or a keyword (all, weekdays, weekends)."
+            )
         if data["timezone"] == "local":
             start = _local_hhmm_to_utc(hass, data["start"])
             stop = _local_hhmm_to_utc(hass, data["stop"])

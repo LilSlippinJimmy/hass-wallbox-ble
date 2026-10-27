@@ -164,8 +164,8 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Halo Standby Light | switch | on action | Turn the LED ring standby light on/off. |
 | Halo Brightness | number | on action | LED ring standby brightness (0–100%). |
 | Max Charging Current | number | on action | Set the max charging current (A). Read back after writing (see [OCPP](#ocpp-controlled-chargers)). |
-| Schedule 0–3 Start / Stop | time | poll / on action | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). Setting a start on an empty slot defaults the stop to start + 1 minute. |
-| Schedule 0–3 Days | select | poll / on action | Which days the slot runs: Every day, Weekdays, Weekends, or a single day. For an arbitrary combination (e.g. Mon+Wed+Fri) use the `wallbox_ble.set_schedule` service's `days` bitmask. |
+| Schedule 0–3 Start / Stop | time | poll / on action | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). Setting a start on an empty slot creates the schedule defaulting to all days, with the stop defaulting to start + 1 minute. |
+| Schedule 0–3 \<day\> | switch | poll / on action | One switch per day (Monday–Sunday) per slot — toggle which days the schedule runs. Grouped under the device's **Configuration** section. A schedule must keep at least one day on (you can't turn off the last one). Only available once the slot has a time set. |
 | Delete Schedule 0–3 | button | — | Delete that schedule slot (only available when the slot is in use). |
 | Reboot | button | — | Reboot the charger. |
 
@@ -233,7 +233,7 @@ Write/replace a single schedule slot.
 | `start` | yes | Start time, `HHMM` (e.g. `0200`). |
 | `stop` | yes | Stop time, `HHMM` (e.g. `0230`). |
 | `sid` | no (default 0) | Schedule slot 0–4. |
-| `days` | no (default 127) | Day bitmask, 127 = every day. |
+| `days` | **yes** | Which days the schedule runs. A list of day names (`[mon, wed, fri]`), a keyword (`all`, `weekdays`, `weekends`), a comma string (`"mon,wed,fri"`), or a Monday-first bitmask integer. Must resolve to at least one day. |
 | `max_current` | no | Max charging current (A). |
 | `timezone` | no (default `local`) | `local` converts local wall-clock to the UTC the charger stores; `utc` sends as-is. |
 
@@ -243,6 +243,7 @@ data:
   start: "0200"
   stop: "0430"
   sid: 0
+  days: [mon, tue, wed, thu, fri]
   timezone: local
 ```
 
