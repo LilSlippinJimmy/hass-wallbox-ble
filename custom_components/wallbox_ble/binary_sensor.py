@@ -5,16 +5,12 @@ Read-only state entities:
                  OCPP you cannot reliably force-start locally, so this reflects
                  state only).
   - Plugged in : whether a car is connected, derived from the charger status
-                 code (`r_dat.st`). Available on non-OCPP chargers only; on
-                 OCPP-controlled chargers plug state can't be deduced over BLE
-                 (status is pinned at Locked), so the sensor reports unavailable
-                 there.
+                 code (realtime `r_sta.charger_status` preferred). Works on all
+                 chargers — OCPP and non-OCPP: on an OCPP-locked charger a
+                 connected car shows as realtime status 19 (waiting-to-unlock)
+                 even though the basic status (`r_dat.st`) stays Locked.
   - OCPP enabled : whether the charger is managed by an OCPP backend. Static;
                    read once at startup.
-
-Note: on OCPP-controlled chargers the coarse BLE status can't distinguish a
-connected car while the charger is OCPP-locked, so the "Plugged In" sensor is
-created but reports unavailable there rather than a misleading plug state.
 """
 from __future__ import annotations
 
@@ -34,12 +30,13 @@ from .entity import WallboxBleEntity
 # r_dat.st / r_sta.charger_status code that means actively charging.
 STATUS_CHARGING = 1
 
-# Status codes (r_dat.st) that mean a car is connected:
+# Status codes (r_sta.charger_status / r_dat.st) that mean a car is connected:
 #   1 = Charging, 2 = Connected waiting for car, 3 = Connected waiting for
 #   schedule, 4 = Paused, 5 = Schedule ended, 8 = Connected waiting for current
-#   assignation. Code 6 (Locked, ambiguous under OCPP) and 0 (Ready, no car) are
-#   deliberately NOT in the set.
-STATUS_CODES_CAR_CONNECTED = frozenset({1, 2, 3, 4, 5, 8})
+#   assignation, 19 = Waiting-to-unlock (connected while OCPP-locked),
+#   20 = Establishing-connection, 21 = Connected low battery.
+#   0 (Ready, no car) and 6 (Locked, no car) are deliberately NOT in the set.
+STATUS_CODES_CAR_CONNECTED = frozenset({1, 2, 3, 4, 5, 8, 19, 20, 21})
 
 
 async def async_setup_entry(
@@ -49,15 +46,9 @@ async def async_setup_entry(
 ) -> None:
     """Set up Wallbox BLE binary sensors."""
     coordinator: WallboxBleCoordinator = hass.data[DOMAIN][entry.entry_id]
-    # OCPP gating approach: AVAILABILITY gating, not creation-time gating. The
-    # `ocpp_enabled` flag is populated only after the first *successful* poll
-    # (the BLE link connects on a background task, so it is almost never ready
-    # during the config-entry first refresh). At this point coordinator.data is
-    # typically {} with no `ocpp_enabled` key, so creation-time gating can't
-    # tell "confirmed non-OCPP" from "flag not read yet". The Plugged In sensor
-    # is therefore always created and suppresses itself via `available`/`is_on`
-    # once the flag is known (matching how WallboxOcppBinarySensor reads the
-    # flag at runtime).
+    # All three sensors are created unconditionally. The Plugged In sensor now
+    # derives plug state from the charger status for every charger (OCPP and
+    # non-OCPP), so there is no OCPP gating to apply here.
     async_add_entities(
         [
             WallboxChargingBinarySensor(coordinator),
@@ -71,6 +62,20 @@ def _status_code(data: dict) -> int | None:
     code = (data.get("status") or {}).get("st")
     if code is None:
         code = (data.get("realtime") or {}).get("charger_status")
+    try:
+        return int(code)
+    except (ValueError, TypeError):
+        return None
+
+
+def _plug_status_code(data: dict) -> int | None:
+    """Status code for plug detection, preferring the realtime (r_sta)
+    status — on OCPP-locked chargers r_dat.st stays at 6 (Locked) while
+    r_sta.charger_status moves to 19 (waiting-to-unlock = car connected).
+    Falls back to r_dat.st when realtime isn't available."""
+    code = (data.get("realtime") or {}).get("charger_status")
+    if code is None:
+        code = (data.get("status") or {}).get("st")
     try:
         return int(code)
     except (ValueError, TypeError):
@@ -94,11 +99,12 @@ class WallboxChargingBinarySensor(WallboxBleEntity, BinarySensorEntity):
 
 
 class WallboxPluggedInBinarySensor(WallboxBleEntity, BinarySensorEntity):
-    """On when a car is connected, derived from the charger status code.
+    """On when a car is connected, derived from the charger status code
+    (preferring the realtime `r_sta` status).
 
-    OCPP-aware via availability gating: plug state cannot be deduced over BLE on
-    OCPP-controlled chargers (`r_dat.st` is pinned at 6/Locked), so the sensor
-    reports unavailable there instead of a misleading value.
+    Works on OCPP and non-OCPP chargers. On an OCPP-locked charger a connected
+    car shows as status 19 (waiting-to-unlock) even though the basic status
+    (`r_dat.st`) stays at 6 (Locked).
     """
 
     _attr_name = "Plugged In"
@@ -108,19 +114,14 @@ class WallboxPluggedInBinarySensor(WallboxBleEntity, BinarySensorEntity):
         super().__init__(coordinator, "plugged_in")
 
     @property
-    def available(self) -> bool:
-        # Suppress on OCPP chargers: plug state can't be deduced over BLE
-        # (r_dat.st pinned at Locked). Otherwise defer to the coordinator's
-        # availability so the sensor still goes unavailable when the link fails.
-        if (self.coordinator.data or {}).get("ocpp_enabled"):
-            return False
-        return super().available
-
-    @property
     def is_on(self) -> bool | None:
-        if (self.coordinator.data or {}).get("ocpp_enabled"):
-            return None
-        code = _status_code(self.coordinator.data or {})
+        # CAVEAT: plug detection depends on r_sta responding. The coordinator's
+        # resilient poll preserves the previous `realtime` value when an r_sta
+        # read fails, so an occasional timeout just holds the last known plug
+        # state. If r_sta has NEVER been read (no `realtime` data yet),
+        # _plug_status_code falls back to r_dat.st — which on an OCPP charger is
+        # 6 (Locked), reading not-plugged until r_sta first arrives. Acceptable.
+        code = _plug_status_code(self.coordinator.data or {})
         return None if code is None else code in STATUS_CODES_CAR_CONNECTED
 
 

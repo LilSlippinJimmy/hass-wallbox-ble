@@ -4,6 +4,14 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.9]
+### Changed
+- The "Plugged In" binary sensor now works on OCPP-controlled chargers too. It
+  derives plug state from the charger's realtime status (`r_sta.charger_status`),
+  which distinguishes a connected car (e.g. status 19, waiting-to-unlock) from
+  an idle locked charger — a distinction the basic status (`r_dat.st`) can't make
+  while the charger is OCPP-locked. The previous OCPP suppression is removed.
+
 ## [0.2.8]
 ### Added
 - The **Plugged In** binary sensor is back for non-OCPP-controlled chargers,
