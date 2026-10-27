@@ -11,3 +11,6 @@ Thumbs.db
 .vscode/
 .idea/
 .release-notes-*.md
+
+# Workflow agent scratch dir (plans, reviews, verification output)
+.agents/
