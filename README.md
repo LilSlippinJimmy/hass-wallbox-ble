@@ -164,7 +164,8 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Halo Standby Light | switch | on action | Turn the LED ring standby light on/off. |
 | Halo Brightness | number | on action | LED ring standby brightness (0–100%). |
 | Max Charging Current | number | on action | Set the max charging current (A). Read back after writing (see [OCPP](#ocpp-controlled-chargers)). |
-| Schedule 0–3 Start / Stop | time | poll / on action | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). |
+| Schedule 0–3 Start / Stop | time | poll / on action | Editable per-slot start/stop times (shown in local time, stored on the charger as UTC). Setting a start on an empty slot defaults the stop to start + 1 minute. |
+| Schedule 0–3 Days | select | poll / on action | Which days the slot runs: Every day, Weekdays, Weekends, or a single day. For an arbitrary combination (e.g. Mon+Wed+Fri) use the `wallbox_ble.set_schedule` service's `days` bitmask. |
 | Delete Schedule 0–3 | button | — | Delete that schedule slot (only available when the slot is in use). |
 | Reboot | button | — | Reboot the charger. |
 

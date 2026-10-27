@@ -52,6 +52,20 @@ def _utc_hhmm_to_local_time(hass: HomeAssistant, hhmm: str) -> dt_time | None:
     return dt_time(hour=local.hour, minute=local.minute)
 
 
+def _hhmm_plus_one_minute(hhmm: str) -> str:
+    """Return the 'HHMM' one minute after the given 'HHMM' (wraps past 23:59)."""
+    h, m = int(hhmm[:2]), int(hhmm[2:])
+    total = (h * 60 + m + 1) % (24 * 60)
+    return f"{total // 60:02d}{total % 60:02d}"
+
+
+def _hhmm_minus_one_minute(hhmm: str) -> str:
+    """Return the 'HHMM' one minute before the given 'HHMM' (wraps before 00:00)."""
+    h, m = int(hhmm[:2]), int(hhmm[2:])
+    total = (h * 60 + m - 1) % (24 * 60)
+    return f"{total // 60:02d}{total % 60:02d}"
+
+
 def _local_time_to_utc_hhmm(hass: HomeAssistant, value: dt_time) -> str:
     """Local datetime.time -> charger UTC 'HHMM' for writing."""
     tz = dt_util.get_time_zone(hass.config.time_zone)
@@ -98,7 +112,16 @@ class WallboxScheduleTime(WallboxBleEntity, TimeEntity):
         # The time being edited (local -> UTC); the other time kept as-is (UTC).
         new_utc = _local_time_to_utc_hhmm(self.hass, value)
         other = slot.get("stop" if self._is_start else "start")
-        other_utc = str(other).zfill(4) if other else ("2341" if self._is_start else "2340")
+
+        if other:
+            other_utc = str(other).zfill(4)
+        elif self._is_start:
+            # Setting start on an empty slot: default stop to start + 1 minute
+            # (a minimal window) rather than a fixed 23:41.
+            other_utc = _hhmm_plus_one_minute(new_utc)
+        else:
+            # Setting stop on an empty slot: default start to stop - 1 minute.
+            other_utc = _hhmm_minus_one_minute(new_utc)
 
         start_utc = new_utc if self._is_start else other_utc
         stop_utc = other_utc if self._is_start else new_utc

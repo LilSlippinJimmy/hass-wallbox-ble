@@ -4,6 +4,19 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.4]
+
+### Added
+- **Schedule Days** select per slot — choose which days a schedule runs (Every
+  day, Weekdays, Weekends, or a single day) instead of always defaulting to
+  every day. Arbitrary combinations remain available via the
+  `wallbox_ble.set_schedule` service's `days` bitmask.
+
+### Changed
+- Setting a schedule **start** time on an empty slot now defaults the **stop**
+  to start + 1 minute (and setting stop defaults start to stop − 1 minute),
+  instead of a fixed 23:41.
+
 ## [0.2.3]
 
 ### Added

@@ -288,6 +288,27 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         _LOGGER.debug("Rebooting charger (rebot)")
         await self._client.request(bapi.MET_REBOOT)
 
+    async def async_set_schedule_days(self, sid: int, days_sunfirst: int) -> dict | None:
+        """Change only the active days of an existing schedule slot.
+
+        Reads the slot's current start/stop/max-current and rewrites it with
+        the new Sunday-first days bitmask, preserving everything else. If the
+        slot doesn't exist yet there are no times to apply days to, so this is
+        a no-op (set a start/stop first).
+        """
+        schedules = (self.data or {}).get("schedules") or []
+        slot = next((s for s in schedules if s.get("sid") == int(sid)), None)
+        if not slot:
+            _LOGGER.debug("Set days: slot %s has no schedule yet; ignoring", sid)
+            return None
+        start = _clean4(slot.get("start"))
+        stop = _clean4(slot.get("stop"))
+        mcr = slot.get("mcr")
+        return await self.async_set_schedule(
+            start, stop, sid=int(sid), days=int(days_sunfirst) & 0x7F,
+            days_are_sunfirst=True, max_current=mcr,
+        )
+
     async def async_set_halo(
         self, *, mode: int | None = None, bright: int | None = None,
         time_s: int | None = None,
