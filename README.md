@@ -27,6 +27,9 @@ using the charger's native "BAPI" protocol.
   energy, plus last-session energy.
 - **Charging binary sensor** — read-only state (see
   [OCPP](#ocpp-controlled-chargers)).
+- **Plugged In binary sensor** — non-OCPP chargers get a plug-state sensor
+  derived from the charger status code; OCPP-controlled chargers don't, since
+  plug state isn't deducible over BLE (see [OCPP](#ocpp-controlled-chargers)).
 - **Max charging current** — settable via a number entity.
 - **Editable schedules** — per-slot start/stop time pickers.
 - **Schedule delete** — per-slot delete buttons and a service (see
@@ -154,6 +157,7 @@ The **Refresh** column shows how each entity's value is kept up to date:
 | Schedules | sensor | poll | Number of schedules configured; all slots exposed as attributes. |
 | Schedule 0–3 | sensor | poll | Per-slot window `HH:MM-HH:MM` (or `none`), with full fields in attributes. |
 | Charging | binary_sensor | poll | On when the charger is actively charging (read-only — see [OCPP](#ocpp-controlled-chargers)). |
+| Plugged In | binary_sensor | poll | On when a car is connected, from the charger status code (`r_dat.st`). Provided on non-OCPP chargers; unavailable on OCPP-controlled chargers where plug state can't be deduced over BLE (see [OCPP](#ocpp-controlled-chargers)). |
 | OCPP Enabled | binary_sensor | static | On when the charger is managed by an OCPP backend. |
 | OCPP Status | sensor | poll | Live OCPP backend connection state: Connected, Not activated, Connection error, Connection rejected, etc. |
 | Firmware Build | sensor | static | Charger firmware build number (diagnostic). Over BLE the charger reports the internal build number (e.g. `181`), not the dotted version (e.g. `6.7.43`) the app shows — that dotted version is cloud-only. |
@@ -301,12 +305,14 @@ app renumbers.
   interval and/or an ESPHome Bluetooth proxy near the charger.
 - **No native schedule delete on some firmware** — emulated via compaction (see
   above).
-- **No "car connected / plugged in" state on OCPP-controlled chargers.**
-  Fine-grained charger state such as "car connected" is only available via the
-  charger's realtime-status (`r_sta`) command, which OCPP-controlled chargers
-  (e.g. Octopus Intelligent) do not answer reliably over Bluetooth. The BLE
-  status read (`r_dat`) is coarse and cannot distinguish a connected car while
-  the charger is OCPP-locked, so no "Plugged In" sensor is provided.
+- **"Car connected / plugged in" state is limited to non-OCPP chargers.** A
+  **Plugged In** sensor is provided on non-OCPP chargers, derived from the
+  coarse `r_dat.st` status code (which moves through the car-connected states
+  there). On OCPP-controlled chargers (e.g. Octopus Intelligent) plug state
+  cannot be deduced over BLE: the charger sits permanently Locked (`r_dat.st`
+  pinned at 6) and the fine-grained realtime status (`r_sta`) is not answered
+  reliably over Bluetooth, so the Plugged In sensor is reported unavailable (not
+  created usefully) for those chargers.
 - **Not available over Bluetooth (so not provided):** some values the Wallbox
   app shows come from the Wallbox **cloud**, not the charger's BLE interface, so
   a local integration cannot read them:

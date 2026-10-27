@@ -4,6 +4,16 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.8]
+### Added
+- The **Plugged In** binary sensor is back for non-OCPP-controlled chargers,
+  derived from the charger status code (connected when charging, waiting for
+  car, waiting for schedule, paused, schedule-ended, or waiting for current —
+  `r_dat.st` in states 1/2/3/4/5/8). On OCPP-controlled chargers (e.g. Octopus
+  Intelligent) plug state cannot be deduced over BLE — the charger sits
+  permanently Locked and the fine-grained realtime status (`r_sta`) is not
+  answered — so the sensor is not created (reported unavailable) there.
+
 ## [0.2.7]
 ### Fixed
 - Status and other BLE entities no longer freeze on stale values when a
