@@ -4,6 +4,32 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.3.0]
+### Fixed
+- **BLE link stability (major).** The integration no longer force-pairs the
+  charger on every connect cycle, which was the root cause of
+  `Insufficient authorization (8)` pairing failures and a constant
+  disconnect/reconnect storm. The connect lifecycle now mirrors the official
+  Wallbox app: it skips bonding when the device is already bonded and triggers
+  encryption on demand by reading the protected "mode" characteristic, only
+  falling back to a single bond when the device is genuinely not bonded.
+- **Schedule edits no longer break the integration.** Setting a schedule slot's
+  start time and then immediately its stop time previously raced on the BLE
+  link and could push the Time entity to `unavailable` with the stop time lost.
+  The two edits are now coalesced into a single atomic schedule write.
+- The per-operation BLE timeout was relaxed (3s to 8s) and now retries once
+  before treating the link as dead, so a single slow reply no longer forces a
+  full reconnect.
+
+### Added
+- `set_schedule_full` service to set a slot's start, stop and days (and optional
+  max current) atomically in one call.
+
+### Changed
+- User-initiated schedule writes now wait briefly for the BLE link to be ready
+  and retry once, deferring quietly instead of erroring when the link is
+  momentarily reconnecting.
+
 ## [0.2.9]
 ### Changed
 - The "Plugged In" binary sensor now works on OCPP-controlled chargers too. It
