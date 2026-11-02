@@ -122,6 +122,10 @@ class WallboxBleClient:
         self._task: asyncio.Task | None = None
         # Set by the disconnected_callback / an op-timeout to wake the run loop.
         self._disconnected = asyncio.Event()
+        # Set the moment the link is fully established (paired + notifying),
+        # cleared on any drop. Lets a user-initiated write briefly await
+        # readiness (wait_ready) instead of failing fast like a poll does.
+        self._ready_event = asyncio.Event()
         self._stop = False
         self._next_id = 1
         # True only after pair + start_notify succeed; cleared on any drop. This
@@ -211,6 +215,7 @@ class WallboxBleClient:
                 _LOGGER.debug("Subscribed to Wallbox TX characteristic")
 
                 self._connected = True
+                self._ready_event.set()
                 backoff = BACKOFF_FLOOR
                 if self._was_unavailable:
                     _LOGGER.info("Wallbox %s BLE link re-established", self._address)
@@ -280,6 +285,7 @@ class WallboxBleClient:
         Kept tiny and non-async: it runs from bleak's loop context.
         """
         self._connected = False
+        self._ready_event.clear()
         self._disconnected.set()
 
     def _on_notify(self, _char, data: bytearray) -> None:
@@ -308,6 +314,36 @@ class WallboxBleClient:
             for met, par in calls:
                 results.append(await self._request_locked(met, par))
         return results
+
+    async def wait_ready(self, timeout: float) -> bool:
+        """Wait up to `timeout` seconds for the link to become ready.
+
+        Unlike `request`/`request_many` (which fail fast so polls never block),
+        this gives a USER-initiated write a short grace period to ride out the
+        normal drop/reconnect churn on this charger. Returns True as soon as the
+        link is ready, or False on timeout. Never raises; never blocks the loop
+        (it awaits an asyncio.Event with a wait_for deadline).
+        """
+        if self.ready:
+            return True
+        try:
+            # The event is set the instant the run loop finishes establishing
+            # the link. Loop because the event may be re-cleared by a drop
+            # between the wake and our `ready` re-check.
+            deadline = asyncio.get_running_loop().time() + max(0.0, timeout)
+            while True:
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(self._ready_event.wait(), remaining)
+                if self.ready:
+                    return True
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("wait_ready error: %s", err)
+        return self.ready
 
     async def _request_locked(self, met: str, par: str) -> dict | None:
         """One write/read round-trip. Caller MUST hold `self._lock`."""
@@ -340,11 +376,13 @@ class WallboxBleClient:
             # single transition-to-unavailable warning.
             _LOGGER.debug("Timeout on %s; forcing reconnect", met)
             self._connected = False
+            self._ready_event.clear()
             self._disconnected.set()
             return None
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("Error on %s: %s; forcing reconnect", met, err)
             self._connected = False
+            self._ready_event.clear()
             self._disconnected.set()
             return None
 
@@ -385,6 +423,7 @@ class WallboxBleClient:
                     await self._client.disconnect()
             self._client = None
         self._connected = False
+        self._ready_event.clear()
         if self._agent_bus is not None:
             with contextlib.suppress(Exception):
                 self._agent_bus.disconnect()

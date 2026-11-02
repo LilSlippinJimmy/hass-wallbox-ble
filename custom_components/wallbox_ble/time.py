@@ -52,20 +52,6 @@ def _utc_hhmm_to_local_time(hass: HomeAssistant, hhmm: str) -> dt_time | None:
     return dt_time(hour=local.hour, minute=local.minute)
 
 
-def _hhmm_plus_one_minute(hhmm: str) -> str:
-    """Return the 'HHMM' one minute after the given 'HHMM' (wraps past 23:59)."""
-    h, m = int(hhmm[:2]), int(hhmm[2:])
-    total = (h * 60 + m + 1) % (24 * 60)
-    return f"{total // 60:02d}{total % 60:02d}"
-
-
-def _hhmm_minus_one_minute(hhmm: str) -> str:
-    """Return the 'HHMM' one minute before the given 'HHMM' (wraps before 00:00)."""
-    h, m = int(hhmm[:2]), int(hhmm[2:])
-    total = (h * 60 + m - 1) % (24 * 60)
-    return f"{total // 60:02d}{total % 60:02d}"
-
-
 def _local_time_to_utc_hhmm(hass: HomeAssistant, value: dt_time) -> str:
     """Local datetime.time -> charger UTC 'HHMM' for writing."""
     tz = dt_util.get_time_zone(hass.config.time_zone)
@@ -91,6 +77,16 @@ class WallboxScheduleTime(WallboxBleEntity, TimeEntity):
         self._is_start = is_start
         self._attr_name = f"Schedule {sid} {'Start' if is_start else 'Stop'}"
         self._attr_icon = "mdi:clock-start" if is_start else "mdi:clock-end"
+        # Value the user just set, shown immediately so the UI doesn't snap back
+        # while the debounced write is pending; cleared once the real read-back
+        # from the coordinator reflects it.
+        self._optimistic: dt_time | None = None
+
+    def _handle_coordinator_update(self) -> None:
+        # A fresh poll/flush read-back has arrived — drop the optimistic value
+        # so native_value reflects the charger's real state again.
+        self._optimistic = None
+        super()._handle_coordinator_update()
 
     def _slot(self) -> dict | None:
         schedules = (self.coordinator.data or {}).get("schedules") or []
@@ -98,6 +94,10 @@ class WallboxScheduleTime(WallboxBleEntity, TimeEntity):
 
     @property
     def native_value(self) -> dt_time | None:
+        # Show the value the user just set until the real read-back arrives, so
+        # a quick double-edit doesn't visibly snap back mid-debounce.
+        if self._optimistic is not None:
+            return self._optimistic
         slot = self._slot()
         if not slot:
             return None
@@ -105,37 +105,38 @@ class WallboxScheduleTime(WallboxBleEntity, TimeEntity):
         return _utc_hhmm_to_local_time(self.hass, hhmm)
 
     async def async_set_value(self, value: dt_time) -> None:
-        """Write the new time to the charger, preserving the slot's other
-        fields (the other time, days, max current)."""
-        slot = self._slot() or {}
+        """Stage the new time and let the coordinator coalesce rapid edits.
 
-        # The time being edited (local -> UTC); the other time kept as-is (UTC).
+        Instead of each start/stop entity firing its own full BLE write (which
+        race on this charger's flaky link and flip the entity to unavailable),
+        we stage JUST the field this entity owns into a per-slot pending buffer
+        on the coordinator and reflect the value optimistically. A debounced
+        flush then performs ONE atomic w_sch for the slot with both edits
+        merged. This never raises on a transient failure — the entity keeps its
+        optimistic value and the next successful poll/flush reconciles it.
+        """
+        # Only the edited field is sent; the other time/days/max-current are
+        # resolved at flush time from whatever is staged or last polled. This is
+        # what lets start-then-stop merge into one write.
         new_utc = _local_time_to_utc_hhmm(self.hass, value)
-        other = slot.get("stop" if self._is_start else "start")
-
-        if other:
-            other_utc = str(other).zfill(4)
-        elif self._is_start:
-            # Setting start on an empty slot: default stop to start + 1 minute
-            # (a minimal window) rather than a fixed 23:41.
-            other_utc = _hhmm_plus_one_minute(new_utc)
-        else:
-            # Setting stop on an empty slot: default start to stop - 1 minute.
-            other_utc = _hhmm_minus_one_minute(new_utc)
-
-        start_utc = new_utc if self._is_start else other_utc
-        stop_utc = other_utc if self._is_start else new_utc
-
-        days = slot.get("days", 127) or 127
-        mcr = slot.get("mcr")
 
         _LOGGER.debug(
-            "Set schedule %s %s -> start=%s stop=%s (days=%s)",
-            self._sid, "start" if self._is_start else "stop",
-            start_utc, stop_utc, days,
+            "Stage schedule %s %s -> %s (debounced)",
+            self._sid, "start" if self._is_start else "stop", new_utc,
         )
-        await self.coordinator.async_set_schedule(
-            start_utc, stop_utc, sid=self._sid, days=int(days),
-            days_are_sunfirst=True, max_current=mcr,
-        )
+        try:
+            self.coordinator.stage_schedule_edit(
+                self._sid,
+                start=new_utc if self._is_start else None,
+                stop=new_utc if not self._is_start else None,
+            )
+            # Optimistically reflect the edit right away.
+            self._optimistic = dt_time(hour=value.hour, minute=value.minute)
+        except Exception as err:  # noqa: BLE001
+            # Never let a transient staging error push the entity to
+            # unavailable; log and keep the last good state.
+            _LOGGER.warning(
+                "Schedule %s %s edit could not be staged: %s (keeping last state)",
+                self._sid, "start" if self._is_start else "stop", err,
+            )
         self.async_write_ha_state()

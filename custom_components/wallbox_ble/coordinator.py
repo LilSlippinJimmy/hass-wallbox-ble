@@ -1,6 +1,8 @@
 """Data update coordinator for Wallbox BLE."""
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import logging
 from datetime import timedelta
 
@@ -73,6 +75,42 @@ def _clean4(hhmm) -> str:
     return s.zfill(4)[-4:]
 
 
+def _hhmm_shift(hhmm: str, minutes: int) -> str:
+    """Shift a 4-digit 'HHMM' by `minutes` (wraps around the 24h clock)."""
+    s = _clean4(hhmm)
+    total = (int(s[:2]) * 60 + int(s[2:]) + minutes) % (24 * 60)
+    return f"{total // 60:02d}{total % 60:02d}"
+
+
+# How long to wait after a Time-entity edit before writing the slot, so a
+# start edit immediately followed by a stop edit coalesces into ONE w_sch
+# write instead of two racing ones.
+SCHEDULE_FLUSH_DELAY = 1.2
+# How long a user-initiated schedule write will wait for the (frequently
+# churning) BLE link to become ready before giving up and deferring.
+SCHEDULE_WRITE_READY_TIMEOUT = 9.0
+
+
+def merge_schedule_pending(existing: dict | None, update: dict) -> dict:
+    """Merge a per-slot pending schedule buffer (pure, HA-free helper).
+
+    Both args are plain dicts describing one schedule slot's intended write.
+    `existing` is the buffer already staged for this sid (or None), `update`
+    is the new partial edit. Keys: 'start', 'stop', 'days', 'max_current'.
+    A value in `update` overrides the existing one ONLY when it is not None;
+    a None in `update` leaves the previously-staged value intact. This is what
+    lets a start-only edit then a stop-only edit merge into a single
+    {start, stop} payload for one atomic w_sch write.
+
+    Returns a NEW dict (never mutates the inputs).
+    """
+    merged = dict(existing or {})
+    for key in ("start", "stop", "days", "max_current"):
+        if key in update and update[key] is not None:
+            merged[key] = update[key]
+    return merged
+
+
 class WallboxBleCoordinator(DataUpdateCoordinator):
     """Polls the charger over BLE and caches status + schedules."""
 
@@ -106,6 +144,12 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         # them every cycle would just add BLE traffic for nothing.
         self._static: dict = {}
         self._static_fetched = False
+        # Per-slot debounce for Time-entity edits. Each sid gets a staged
+        # {start,stop,days,max_current} buffer and its own flush handle so a
+        # start-then-stop double-edit coalesces into ONE w_sch write, and edits
+        # to DIFFERENT slots flush independently. Keyed by int sid.
+        self._pending_schedules: dict[int, dict] = {}
+        self._schedule_flush_handles: dict[int, object] = {}
 
     @property
     def address(self) -> str:
@@ -377,6 +421,100 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
                 self.async_set_updated_data(nd)
         return halo
 
+    def stage_schedule_edit(
+        self,
+        sid: int,
+        *,
+        start: str | None = None,
+        stop: str | None = None,
+        days: int | None = None,
+        max_current: int | None = None,
+    ) -> None:
+        """Stage a partial schedule edit for one slot and (re)arm a debounced
+        flush, so a start edit immediately followed by a stop edit coalesces
+        into ONE atomic w_sch write instead of two racing ones.
+
+        Called from the per-slot Time entities' async_set_value. start/stop are
+        charger-UTC 'HHMM' strings; days (if given) is a Sunday-first bitmask —
+        the flush always writes days Sunday-first (days_are_sunfirst=True), the
+        form the charger stores and reads back. Any field
+        left None keeps whatever was previously staged for this sid (see
+        merge_schedule_pending). Edits to different sids are buffered and flushed
+        independently.
+        """
+        from homeassistant.helpers.event import async_call_later
+
+        sid_i = int(sid)
+        update = {
+            "start": _clean4(start) if start is not None else None,
+            "stop": _clean4(stop) if stop is not None else None,
+            "days": (int(days) & 0x7F) if days is not None else None,
+            "max_current": max_current,
+        }
+        self._pending_schedules[sid_i] = merge_schedule_pending(
+            self._pending_schedules.get(sid_i), update
+        )
+
+        # Cancel any armed flush for THIS sid and re-arm, so a rapid second edit
+        # resets the timer and only one write fires with both new values. Other
+        # sids' timers are untouched (independent flush).
+        handle = self._schedule_flush_handles.pop(sid_i, None)
+        if handle is not None:
+            handle()  # async_call_later returns a cancel callback
+
+        def _fire(_now) -> None:
+            self._schedule_flush_handles.pop(sid_i, None)
+            self.hass.async_create_task(self._flush_schedule(sid_i))
+
+        self._schedule_flush_handles[sid_i] = async_call_later(
+            self.hass, SCHEDULE_FLUSH_DELAY, _fire
+        )
+
+    async def _flush_schedule(self, sid: int) -> dict | None:
+        """Write the staged (merged) edit for one slot as a single w_sch.
+
+        Pops the pending buffer for `sid` up front so a new edit arriving while
+        this flush is in flight stages fresh and re-arms its own timer rather
+        than being dropped. If the buffer has no start/stop (nothing writable),
+        it is a no-op.
+        """
+        pending = self._pending_schedules.pop(int(sid), None)
+        if not pending:
+            return None
+
+        # Resolve start/stop: prefer staged, else the slot's current value from
+        # the last poll, else a minimal 1-minute window off whichever we have.
+        slot = next(
+            (s for s in (self.data or {}).get("schedules", [])
+             if s.get("sid") == int(sid)),
+            None,
+        ) or {}
+        start = pending.get("start") or (
+            _clean4(slot.get("start")) if slot.get("start") else None
+        )
+        stop = pending.get("stop") or (
+            _clean4(slot.get("stop")) if slot.get("stop") else None
+        )
+        if start is None and stop is None:
+            _LOGGER.debug("Flush slot %s: nothing to write", sid)
+            return None
+        if start is None:
+            start = _hhmm_shift(stop, -1)
+        if stop is None:
+            stop = _hhmm_shift(start, +1)
+
+        days = pending.get("days")
+        if days is None:
+            days = int(slot.get("days", 127) or 127) & 0x7F
+        mcr = pending.get("max_current")
+        if mcr is None:
+            mcr = slot.get("mcr")
+
+        return await self.async_set_schedule(
+            start, stop, sid=int(sid), days=int(days) & 0x7F,
+            days_are_sunfirst=True, max_current=mcr,
+        )
+
     async def async_set_schedule(
         self,
         start: str,
@@ -432,6 +570,21 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         import json
 
         par_json = json.dumps(packed)  # quoted JSON string
+
+        # USER-WRITE PATH (unlike polling's fail-fast): a schedule write is user
+        # initiated and must not be lost just because the link is mid-reconnect.
+        # Give the link a short grace period to become ready. On timeout, don't
+        # crash or mark the entity unavailable — report a deferral the caller
+        # (Time entity / service) can surface quietly.
+        if not self._client.ready:
+            ready = await self._client.wait_ready(SCHEDULE_WRITE_READY_TIMEOUT)
+            if not ready:
+                _LOGGER.warning(
+                    "Schedule write to slot %s deferred: BLE link not ready "
+                    "(will reconcile on next successful poll)", sid_i,
+                )
+                return {"ok": False, "reason": "link_not_ready", "slot": None}
+
         _LOGGER.debug("Writing schedule w_sch par=%s", par_json)
         # Fire-and-confirm: w_sch sends no reply, so ignore the (None) response
         # and verify by reading the schedules straight back. Both calls run
@@ -442,14 +595,33 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         )
 
         after = (schedules or {}).get("schedules", [])
+        slot = next((s for s in after if s.get("sid") == sid_i), None)
+        ok = bool(slot and slot.get("start") == start_s and slot.get("stop") == stop_s)
+
+        # Retry ONCE: if the read-back was empty but the link is still ready, the
+        # write may have landed in a brief wobble. Re-issue the same atomic
+        # write+read before declaring it un-applied.
+        if not ok and self._client.ready:
+            _LOGGER.debug(
+                "Schedule slot %s read back empty; retrying write once", sid_i
+            )
+            await asyncio.sleep(0.5)
+            _, schedules = await self._client.request_many(
+                [("w_sch", par_json), (bapi.MET_GET_SCHEDULES, "null")]
+            )
+            after = (schedules or {}).get("schedules", [])
+            slot = next((s for s in after if s.get("sid") == sid_i), None)
+            ok = bool(
+                slot and slot.get("start") == start_s and slot.get("stop") == stop_s
+            )
+
         # Push the fresh read into the coordinator so entities update at once.
-        if self.data is not None:
+        # Only when we actually got schedules back (don't blank them on a miss).
+        if after and self.data is not None:
             new_data = dict(self.data)
             new_data["schedules"] = after
             self.async_set_updated_data(new_data)
 
-        slot = next((s for s in after if s.get("sid") == sid_i), None)
-        ok = bool(slot and slot.get("start") == start_s and slot.get("stop") == stop_s)
         if not ok:
             _LOGGER.warning(
                 "Schedule write to slot %s may not have applied (read back: %s)",
@@ -547,5 +719,12 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         return {"ok": ok, "schedules": after}
 
     async def async_shutdown(self) -> None:
+        # Cancel any armed schedule-flush timers so they don't fire after the
+        # link is gone.
+        for handle in list(self._schedule_flush_handles.values()):
+            with contextlib.suppress(Exception):
+                handle()
+        self._schedule_flush_handles.clear()
+        self._pending_schedules.clear()
         await super().async_shutdown()
         await self._client.stop()

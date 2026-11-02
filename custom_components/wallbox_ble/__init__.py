@@ -28,6 +28,7 @@ from .const import (
     SERVICE_DELETE_SCHEDULE,
     SERVICE_PROBE,
     SERVICE_SET_SCHEDULE,
+    SERVICE_SET_SCHEDULE_FULL,
 )
 from .coordinator import WallboxBleCoordinator
 
@@ -92,7 +93,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         await coordinator.async_shutdown()
         # When the last entry unloads, drop the domain-wide services too.
         if not hass.data[DOMAIN]:
-            for service in (SERVICE_PROBE, SERVICE_SET_SCHEDULE, SERVICE_DELETE_SCHEDULE):
+            for service in (
+                SERVICE_PROBE,
+                SERVICE_SET_SCHEDULE,
+                SERVICE_SET_SCHEDULE_FULL,
+                SERVICE_DELETE_SCHEDULE,
+            ):
                 if hass.services.has_service(DOMAIN, service):
                     hass.services.async_remove(DOMAIN, service)
     return unloaded
@@ -251,9 +257,14 @@ _SET_SCHEDULE_SCHEMA = vol.Schema(
 
 
 def _register_schedule_service(hass: HomeAssistant) -> None:
-    """Register the set_schedule service (once)."""
-    if hass.services.has_service(DOMAIN, SERVICE_SET_SCHEDULE):
-        return
+    """Register the set_schedule service (and its set_schedule_full alias), once.
+
+    Both names run the SAME handler: one atomic BLE write that sets start, stop
+    AND days (plus optional max_current) for one slot in a single w_sch — the
+    "do it all in one request" path, so an automation doesn't have to poke the
+    per-slot Start and Stop Time entities separately (which is what races the
+    link). `set_schedule_full` is a self-documenting alias for that behaviour.
+    """
 
     async def _handle_set_schedule(call: ServiceCall) -> None:
         data = _SET_SCHEDULE_SCHEMA(dict(call.data))
@@ -279,9 +290,11 @@ def _register_schedule_service(hass: HomeAssistant) -> None:
                 max_current=data.get("max_current"),
             )
 
-    hass.services.async_register(
-        DOMAIN, SERVICE_SET_SCHEDULE, _handle_set_schedule, schema=_SET_SCHEDULE_SCHEMA
-    )
+    for service in (SERVICE_SET_SCHEDULE, SERVICE_SET_SCHEDULE_FULL):
+        if not hass.services.has_service(DOMAIN, service):
+            hass.services.async_register(
+                DOMAIN, service, _handle_set_schedule, schema=_SET_SCHEDULE_SCHEMA
+            )
 
 
 _DELETE_SCHEDULE_SCHEMA = vol.Schema(

@@ -17,4 +17,5 @@ MAX_SCAN_INTERVAL = 120
 # Services.
 SERVICE_PROBE = "probe"
 SERVICE_SET_SCHEDULE = "set_schedule"
+SERVICE_SET_SCHEDULE_FULL = "set_schedule_full"
 SERVICE_DELETE_SCHEDULE = "delete_schedule"

@@ -92,6 +92,75 @@ set_schedule:
             - "local"
             - "utc"
 
+set_schedule_full:
+  name: Set schedule (atomic, all fields)
+  description: >-
+    Set START and STOP and DAYS (and optional max current) for ONE schedule
+    slot in a SINGLE BLE write. Identical to set_schedule — provided as a
+    self-documenting "do it all in one request" path so an automation can set
+    a whole slot at once instead of poking the per-slot Start/Stop time
+    entities separately (which can race the BLE link). Times are HHMM.
+  fields:
+    start:
+      name: Start
+      description: Start time as HHMM (e.g. "0200").
+      required: true
+      example: "0200"
+      selector:
+        text:
+    stop:
+      name: Stop
+      description: Stop time as HHMM (e.g. "0230").
+      required: true
+      example: "0230"
+      selector:
+        text:
+    sid:
+      name: Schedule slot
+      description: Which schedule slot to write (0-3).
+      required: false
+      default: 0
+      example: 0
+      selector:
+        number:
+          min: 0
+          max: 4
+          mode: box
+    days:
+      name: Days
+      description: >-
+        Which days the schedule runs. Required. Accepts a list of day names
+        (e.g. [mon, wed, fri]), a keyword (all, weekdays, weekends), a
+        comma-separated string ("mon,wed,fri"), or a Monday-first bitmask
+        integer.
+      required: true
+      example: [mon, wed, fri]
+      selector:
+        object:
+    max_current:
+      name: Max current
+      description: Max charging current in amps for this schedule.
+      required: false
+      example: 32
+      selector:
+        number:
+          min: 6
+          max: 32
+          unit_of_measurement: "A"
+    timezone:
+      name: Timezone
+      description: >-
+        How to interpret start/stop. "local" (default) converts local
+        wall-clock time to the UTC the charger stores. "utc" sends as-is.
+      required: false
+      default: local
+      example: local
+      selector:
+        select:
+          options:
+            - "local"
+            - "utc"
+
 delete_schedule:
   name: Delete schedule
   description: >-
