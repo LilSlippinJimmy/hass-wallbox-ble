@@ -43,15 +43,100 @@ _LOGGER = logging.getLogger(__name__)
 WALLBOX_SERVICE_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307"
 UART_RX_CHAR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833"  # write to charger
 UART_TX_CHAR_UUID = "a73e9a10-628f-4494-a099-12efaf72258f"  # notify from charger
+# The "mode" characteristic. The official Wallbox app READS this protected
+# characteristic to trigger on-demand SMP encryption/bonding, instead of forcing
+# a bond up front (decompiled app `vt\e.java` triggerBonding; findings report
+# §2, §3). We read it for the same purpose: a successful read means the link is
+# encrypted and usable. We never force a re-pair when this read succeeds.
+MODE_CHAR_UUID = "75a9f022-af03-4e41-b4bc-9de90a47d50b"  # protected; read => encrypt
 
-# Short per-operation timeout on a single write/read round-trip. A longer wait
-# (the old 8s) just blocks on a dead link; 3s is plenty for a live charger and
-# turns a zombie link into a prompt reconnect.
-OP_TIMEOUT = 3.0
+# Per-operation timeout on a single write/read round-trip. The official app has
+# NO 3s per-op teardown — its only connect deadline is a ~15s whole-bringup
+# watchdog (findings §2, §4). A tight 3s timeout turned any slow reply into a
+# full reconnect (and, with the old code, another forced re-pair) — a disconnect
+# storm. So we give a single op ~8s, and on timeout RETRY the op once before
+# declaring the link dead (see OP_RETRIES). Only after the retry also times out
+# do we force a reconnect.
+OP_TIMEOUT = 8.0
+# Number of extra attempts for a single op after the first times out, before the
+# link is declared a zombie. 1 => up to two attempts total.
+OP_RETRIES = 1
+# Whole-connection bring-up watchdog, matching the app's ~15s connect timeout
+# (findings §2: `wt\e.java` postDelayed(..., 15000L)). Bounds the connect +
+# encrypt + subscribe sequence so a stuck bring-up recycles instead of hanging
+# the background task forever. This is a bring-up liveness bound, NOT a per-op
+# value — the two are deliberately decoupled (P3).
+CONNECT_WATCHDOG = 15.0
 
 # Exponential reconnect back-off bounds.
 BACKOFF_FLOOR = 5.0
 BACKOFF_CAP = 120.0
+
+
+# --- Pure helper: classify a BlueZ/bleak error from the mode-char read -------
+# Kept HA-free and side-effect-free so it can be unit-tested without bleak or a
+# charger. It decides what a failed protected-characteristic read means, mapping
+# the app's GATT status handling (findings §2 "Error handling that matters for
+# code 8") onto the string errors BlueZ/bleak surface in HA:
+#
+#   "encryption_needed" — the read failed because the link is not yet encrypted
+#       / not authenticated (GATT 5 InsufficientAuthentication, 15/143
+#       InsufficientEncryption, or BlueZ "Not paired"/"Not authorized"
+#       equivalents). The app's recovery for these is to bond and retry, so when
+#       the device is NOT already bonded we do a single fallback bond.
+#   "already_authorized" — GATT 8 InsufficientAuthorization and look-alikes
+#       ("already exists", "AuthenticationFailed"). On an ALREADY-bonded device
+#       these mean "the bond is there, stop trying to re-pair"; they are
+#       NON-FATAL — we continue to subscribe. Forcing a re-pair here is exactly
+#       what produced the `Insufficient authorization (8)` drop (findings §5.a).
+#   "fatal" — anything else (disconnected, GATT error we don't recognise): let
+#       the connect cycle treat it as a failure and recycle the link.
+
+_ENCRYPTION_NEEDED_MARKERS = (
+    "insufficient authentication",
+    "insufficient encryption",
+    "not paired",
+    "not authenticated",
+    "encryption",
+    "le-connection-parameter",  # transient; treat as needs-retry-via-bond
+)
+_ALREADY_AUTHORIZED_MARKERS = (
+    "insufficient authorization",
+    "authorization",
+    "already exists",
+    "authenticationfailed",
+    "authentication failed",
+    "org.bluez.error.alreadyexists",
+)
+
+
+def classify_mode_read_error(err: BaseException | str) -> str:
+    """Classify a mode-char read failure. Pure; returns one of
+    'encryption_needed' | 'already_authorized' | 'fatal'.
+
+    Takes an exception or a raw message string. Matching is case-insensitive on
+    the text of the error (BlueZ/bleak expose these as string messages, not
+    typed codes, through HA's stack), with the GATT numeric codes (5/8/15/143)
+    also recognised when present in the text.
+    """
+    text = (str(err) if not isinstance(err, str) else err).lower()
+
+    # Numeric GATT codes sometimes appear verbatim, e.g. "... (8)".
+    if "(8)" in text or "code 8" in text or "status 8" in text:
+        return "already_authorized"
+    if (
+        "(5)" in text or "code 5" in text or "status 5" in text
+        or "(15)" in text or "(143)" in text
+    ):
+        return "encryption_needed"
+
+    # Authorization look-alikes are checked BEFORE the broad encryption markers
+    # so "insufficient authorization" isn't swallowed by a generic match.
+    if any(m in text for m in _ALREADY_AUTHORIZED_MARKERS):
+        return "already_authorized"
+    if any(m in text for m in _ENCRYPTION_NEEDED_MARKERS):
+        return "encryption_needed"
+    return "fatal"
 
 
 async def _register_pairing_agent() -> object | None:
@@ -203,16 +288,13 @@ class WallboxBleClient:
                 )
                 _LOGGER.debug("Connected to %s", self._address)
 
-                # Establish SMP encryption BEFORE subscribing/writing. Reads
-                # work on an unpaired link, but settings writes (w_sch / ...)
-                # are rejected until the link is encrypted. Most chargers
-                # without a BAPI PIN use "Just Works" pairing (no prompt), which
-                # needs a NoInputNoOutput agent registered to auto-accept.
-                self._agent_bus = await _register_pairing_agent()
-                await self._pair()
-
-                await self._client.start_notify(UART_TX_CHAR_UUID, self._on_notify)
-                _LOGGER.debug("Subscribed to Wallbox TX characteristic")
+                # Bring the link fully up — encrypt (the app's way) + subscribe —
+                # under a single ~15s watchdog, matching the official app's only
+                # connect deadline (findings §2/§4). This is a whole-bringup
+                # bound, deliberately NOT the tiny per-op timeout (P3).
+                await asyncio.wait_for(
+                    self._bring_up_link(), CONNECT_WATCHDOG
+                )
 
                 self._connected = True
                 self._ready_event.set()
@@ -249,21 +331,181 @@ class WallboxBleClient:
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, BACKOFF_CAP)
 
-    async def _pair(self) -> None:
-        """Pair/encrypt the link, trying the HA-backend bonding path explicitly.
+    async def _bring_up_link(self) -> None:
+        """Encrypt the link the way the official app does, then subscribe.
 
-        bleak's high-level pair() often raises NotImplementedError on HA's
-        BlueZ backend, so we fall back to the backend's bluetooth_device_pair,
-        exactly as the jagheterfredrik/wallbox-ble reference does. Every step is
-        logged (and NOT suppressed) so we can see what actually happened.
+        This replaces the old "force a re-pair on every connect" path, which was
+        the PRIMARY cause of `Insufficient authorization (8)` + mid-handshake
+        drops (findings §5.a). The app's model (findings §2, §6 P1/P2):
+
+          * It NEVER re-bonds a device that is already bonded. It checks bond
+            state and only arms the bond flow when the device is NOT bonded.
+          * It establishes encryption ON DEMAND by READING a protected
+            characteristic (the "mode" char). On BlueZ, reading an
+            encryption-protected characteristic makes the stack negotiate
+            security on demand — which is exactly what we want.
+          * A bare createBond()/bluetooth_device_pair() is only ever the
+            RECOVERY step after an encryption/authentication failure, and only
+            when not already bonded.
+
+        Sequence here (P1 -> P2 -> fallback -> subscribe):
+          1. Read bond state (P1). Non-fatal if unreadable -> 'unknown'.
+          2. Read the mode char (P2). Success => link is encrypted/usable; do
+             NOT pair. Proceed to subscribe.
+          3. On a read failure, classify it:
+               - 'already_authorized' (GATT 8 etc.): the bond exists, stop
+                 trying to re-pair -> treat as NON-FATAL, continue to subscribe.
+               - 'encryption_needed' AND not already bonded/unknown: do ONE
+                 best-effort fallback bond, then retry the read once.
+               - 'fatal' (or still failing after fallback): raise so the connect
+                 cycle recycles the link.
+             The key invariant: NEVER force a re-pair on an already-bonded
+             device.
+          4. start_notify on TX (the app subscribes TX then RX; we only need TX
+             for BAPI responses). No MTU request (findings §4/§5: BGX stays at
+             the default 23-byte MTU).
         """
-        # 1. Try the high-level API. (Returns None on success on HA's backend.)
+        # 1. Bond state (P1). Maps the app's Android BOND_BONDED to BlueZ
+        #    Device1.Paired. None => couldn't read it; treat as 'unknown'.
+        bonded = await self._is_bonded()
+        _LOGGER.debug(
+            "Wallbox %s bond state: %s", self._address,
+            {True: "bonded", False: "not bonded", None: "unknown"}[bonded],
+        )
+
+        # The NoInputNoOutput agent assists a FIRST (Just-Works) bond. We keep
+        # it registered for the cycle so a fallback bond can auto-accept, but it
+        # is NOT what drives encryption any more — the mode-char read is.
+        if self._agent_bus is None:
+            self._agent_bus = await _register_pairing_agent()
+
+        # 2. Primary encryption trigger: read the protected mode char (P2).
+        ok, err = await self._try_read_mode_char()
+        if not ok:
+            verdict = classify_mode_read_error(err) if err is not None else "fatal"
+            _LOGGER.debug(
+                "Mode-char read failed (%s -> %s)", err, verdict,
+            )
+
+            if verdict == "already_authorized":
+                # GATT 8 / "already exists" / AuthenticationFailed. On an
+                # existing bond these mean "the bond is already there" — NOT a
+                # reason to re-pair. Reads/writes work on the existing bond, so
+                # continue to subscribe. This is the exact case that used to
+                # trigger the disconnect storm (findings §5.a).
+                _LOGGER.debug(
+                    "Treating authorization result as already-bonded; continuing "
+                    "without re-pair",
+                )
+            elif verdict == "encryption_needed" and bonded is not True:
+                # Not (known) bonded and the link needs encryption: do ONE
+                # best-effort fallback bond, then retry the read once. This
+                # mirrors the app using createBond() only as recovery, and only
+                # when not already bonded.
+                _LOGGER.debug("Link needs encryption and not bonded; fallback bond")
+                await self._fallback_bond()
+                ok2, err2 = await self._try_read_mode_char()
+                if not ok2:
+                    verdict2 = (
+                        classify_mode_read_error(err2) if err2 is not None else "fatal"
+                    )
+                    if verdict2 == "already_authorized":
+                        _LOGGER.debug(
+                            "Post-bond read reports already-authorized; continuing",
+                        )
+                    else:
+                        # Still not usable after a single fallback bond — recycle.
+                        raise RuntimeError(
+                            f"Mode-char read failed after fallback bond: {err2}"
+                        )
+            elif verdict == "encryption_needed" and bonded is True:
+                # Already bonded but the read reported an encryption error. Do
+                # NOT force a re-pair (the invariant). The bond should already
+                # provide encryption; a transient error here is best handled by
+                # letting the op layer retry. Continue to subscribe and let the
+                # first real read/write confirm liveness.
+                _LOGGER.debug(
+                    "Already bonded; encryption error on read treated as "
+                    "transient, continuing without re-pair",
+                )
+            else:
+                # 'fatal' — unknown/disconnect error; recycle the link.
+                raise RuntimeError(f"Mode-char read failed (fatal): {err}")
+
+        # 4. Subscribe to TX notify. No MTU request (BGX uses default 23).
+        await self._client.start_notify(UART_TX_CHAR_UUID, self._on_notify)
+        _LOGGER.debug("Subscribed to Wallbox TX characteristic")
+
+    async def _is_bonded(self) -> bool | None:
+        """Return True/False if BlueZ bond state is readable, else None.
+
+        Maps Android BOND_BONDED -> BlueZ org.bluez Device1.Paired (findings
+        §6 P1, marked INFERRED there). Best-effort: inspects the bleak BlueZ
+        backend's cached device properties; any failure degrades to None
+        ('unknown') rather than crashing the background task.
+        """
+        try:
+            backend = getattr(self._client, "_backend", None)
+            if backend is None:
+                return None
+            # BlueZ backend caches the org.bluez Device1 properties here.
+            info = getattr(backend, "_device_info", None)
+            if isinstance(info, dict):
+                # Keys are org.bluez property names. "Paired" is BlueZ's bond
+                # flag (there is no separate "Bonded" in the Device1 iface).
+                for key in ("Paired", "Bonded"):
+                    if key in info:
+                        return bool(info[key])
+            # Fall back to any 'details' mapping some backends expose.
+            details = getattr(self._client, "details", None)
+            if isinstance(details, dict):
+                props = details.get("props") if "props" in details else details
+                if isinstance(props, dict):
+                    for key in ("Paired", "Bonded"):
+                        if key in props:
+                            return bool(props[key])
+            return None
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Could not read bond state: %s", err)
+            return None
+
+    async def _try_read_mode_char(self) -> tuple[bool, BaseException | None]:
+        """Read the protected mode char to trigger on-demand encryption (P2).
+
+        Returns (True, None) on success (link is encrypted/usable), or
+        (False, exception) on failure, leaving classification to the caller.
+        Never raises — a failure is returned as data so the state machine stays
+        in one place.
+        """
+        try:
+            value = await asyncio.wait_for(
+                self._client.read_gatt_char(MODE_CHAR_UUID), OP_TIMEOUT
+            )
+            _LOGGER.debug(
+                "Mode-char read OK (%d bytes) — link encrypted", len(value or b"")
+            )
+            return True, None
+        except asyncio.CancelledError:
+            raise
+        except Exception as err:  # noqa: BLE001
+            return False, err
+
+    async def _fallback_bond(self) -> None:
+        """Single best-effort OS bond, used ONLY as recovery (P1/P2 fallback).
+
+        This is the OLD force-pair path, now reached only when the link needs
+        encryption AND the device is not already bonded. It is best-effort and
+        non-fatal: a failure here is logged but does not tear the link down, so
+        the subsequent mode-char retry (or a real read) decides usability. We
+        NEVER call this on an already-bonded device.
+        """
+        # 1. Try bleak's high-level pair(). Returns None on success on HA BlueZ.
         try:
             await self._client.pair()
-            _LOGGER.debug("Paired via high-level pair()")
+            _LOGGER.debug("Fallback bond via high-level pair()")
             return
         except NotImplementedError:
-            _LOGGER.debug("pair() not implemented on this backend; using backend path")
+            _LOGGER.debug("pair() not implemented; using backend bond path")
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("pair() high-level error: %s; trying backend path", err)
 
@@ -273,11 +515,13 @@ class WallboxBleClient:
             await backend._client.bluetooth_device_pair(  # noqa: SLF001
                 backend._address_as_int  # noqa: SLF001
             )
-            _LOGGER.debug("Paired via backend bluetooth_device_pair()")
+            _LOGGER.debug("Fallback bond via backend bluetooth_device_pair()")
         except Exception as err:  # noqa: BLE001
-            # Writes need an encrypted link; a genuine pair failure is worth a
-            # warning since it will break schedule/switch writes.
-            _LOGGER.warning("BLE pairing failed: %s (%s)", err, type(err).__name__)
+            # Non-fatal: the mode-char retry / first real read will decide.
+            _LOGGER.debug(
+                "Fallback bond attempt did not complete: %s (%s)",
+                err, type(err).__name__,
+            )
 
     def _on_disconnect(self, _client) -> None:
         """BlueZ drop callback — fire the event so `_run` recycles the link.
@@ -345,8 +589,16 @@ class WallboxBleClient:
             _LOGGER.debug("wait_ready error: %s", err)
         return self.ready
 
-    async def _request_locked(self, met: str, par: str) -> dict | None:
-        """One write/read round-trip. Caller MUST hold `self._lock`."""
+    async def _attempt_once(
+        self, met: str, par: str, attempt: int
+    ) -> tuple[dict | None, bool, Exception | None]:
+        """A single write+read round-trip. Caller MUST hold `self._lock`.
+
+        Returns (parsed_or_None, timed_out, error). `timed_out` is True when the
+        op hit OP_TIMEOUT (a retry candidate); `error` is set for a non-timeout
+        failure (a genuine broken link). Each attempt builds a FRESH request id
+        and drains stale RX so a retry never matches a previous reply.
+        """
         req_id = self._next_id
         self._next_id += 1
 
@@ -358,7 +610,7 @@ class WallboxBleClient:
             self._rx_queue.get_nowait()
         self._parser.reset()
 
-        _LOGGER.debug("TX %s (id=%s): %s", met, req_id, framed.hex())
+        _LOGGER.debug("TX %s (id=%s, attempt=%d): %s", met, req_id, attempt, framed.hex())
         try:
             await asyncio.wait_for(
                 self._client.write_gatt_char(
@@ -369,18 +621,51 @@ class WallboxBleClient:
             parsed = await asyncio.wait_for(
                 self._collect_response(req_id), OP_TIMEOUT
             )
+            return parsed, False, None
         except asyncio.TimeoutError:
-            # A timeout is the zombie-link signal (is_connected lies True). Break
-            # the link so the persistent loop recycles it instead of writing to
-            # a dead characteristic forever. DEBUG only — the loop logs the
-            # single transition-to-unavailable warning.
-            _LOGGER.debug("Timeout on %s; forcing reconnect", met)
-            self._connected = False
-            self._ready_event.clear()
-            self._disconnected.set()
-            return None
+            # A slow reply, NOT necessarily a dead link — signal the caller to
+            # retry before declaring the link a zombie (P3).
+            return None, True, None
+        except asyncio.CancelledError:
+            raise
         except Exception as err:  # noqa: BLE001
-            _LOGGER.debug("Error on %s: %s; forcing reconnect", met, err)
+            return None, False, err
+
+    async def _request_locked(self, met: str, par: str) -> dict | None:
+        """One write/read round-trip. Caller MUST hold `self._lock`.
+
+        P3 — decouple "slow reply" from "dead link": on a per-op TIMEOUT we RETRY
+        the op once (OP_RETRIES) before declaring the link a zombie. The official
+        app has no 3s per-op teardown — only a ~15s bring-up watchdog (findings
+        §2/§4) — so one slow reply must NOT single-handedly tear the link down
+        (and, with the old code, force a re-pair). Only after the retry also
+        times out do we fire `_disconnected` to recycle the link.
+        """
+        parsed: dict | None = None
+        for attempt in range(OP_RETRIES + 1):
+            parsed, timed_out, err = await self._attempt_once(met, par, attempt)
+            if err is not None:
+                # A non-timeout error (write failed, disconnected mid-op) is a
+                # genuine dead/broken link — recycle immediately, no retry.
+                _LOGGER.debug("Error on %s: %s; forcing reconnect", met, err)
+                self._connected = False
+                self._ready_event.clear()
+                self._disconnected.set()
+                return None
+            if not timed_out:
+                break
+            # Timed out. Retry once more before giving up (unless out of tries).
+            if attempt < OP_RETRIES:
+                _LOGGER.debug(
+                    "Timeout on %s (attempt %d/%d); retrying before reconnect",
+                    met, attempt + 1, OP_RETRIES + 1,
+                )
+                continue
+            # Retry budget exhausted: now it's a zombie link. Force reconnect.
+            _LOGGER.debug(
+                "Timeout on %s after %d attempts; forcing reconnect",
+                met, OP_RETRIES + 1,
+            )
             self._connected = False
             self._ready_event.clear()
             self._disconnected.set()
@@ -388,10 +673,9 @@ class WallboxBleClient:
 
         if parsed is None:
             return None
-        # Only return the response matching our request id; the payload is under
-        # "r". Return the whole parsed dict if "r" is absent.
-        if parsed.get("id") not in (req_id, None):
-            _LOGGER.debug("Ignoring mismatched response id %s", parsed.get("id"))
+        # `_attempt_once` -> `_collect_response` already matched the reply to the
+        # request id, so `parsed` is the right response. The payload is under
+        # "r"; return the whole parsed dict if "r" is absent.
         _LOGGER.debug("RX %s: %s", met, parsed)
         return parsed.get("r", parsed)
 
