@@ -30,13 +30,18 @@ from .entity import WallboxBleEntity
 # r_dat.st / r_sta.charger_status code that means actively charging.
 STATUS_CHARGING = 1
 
-# Status codes (r_sta.charger_status / r_dat.st) that mean a car is connected:
+# Status codes (r_sta.charger_status / r_dat.st) that mean a car is connected.
+# Values are the Wallbox coarse status enum (decompiled app a71/a.java,
+# EnumC0023a):
 #   1 = Charging, 2 = Connected waiting for car, 3 = Connected waiting for
 #   schedule, 4 = Paused, 5 = Schedule ended, 8 = Connected waiting for current
-#   assignation, 19 = Waiting-to-unlock (connected while OCPP-locked),
-#   20 = Establishing-connection, 21 = Connected low battery.
+#   assignation, 15 = OCPP charge finishing (connected; seen on an
+#   Octopus/OCPP-controlled charger when the car is plugged in and the session
+#   has wound down — this charger sits at 15 rather than 19), 19 =
+#   Waiting-to-unlock (connected while OCPP-locked), 20 = Establishing-
+#   connection, 21 = Connected low battery.
 #   0 (Ready, no car) and 6 (Locked, no car) are deliberately NOT in the set.
-STATUS_CODES_CAR_CONNECTED = frozenset({1, 2, 3, 4, 5, 8, 19, 20, 21})
+STATUS_CODES_CAR_CONNECTED = frozenset({1, 2, 3, 4, 5, 8, 15, 19, 20, 21})
 
 
 async def async_setup_entry(
