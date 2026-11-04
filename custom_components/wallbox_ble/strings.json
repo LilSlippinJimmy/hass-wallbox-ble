@@ -6,16 +6,12 @@
         "title": "Add Wallbox charger",
         "description": "Pick the Wallbox charger to control over Bluetooth. Make sure the Wallbox phone app's Bluetooth is disconnected (the charger allows only one BLE connection at a time).",
         "data": {
-          "address": "Charger",
-          "pin": "BLE PIN (only if set in the Wallbox app)"
+          "address": "Charger"
         }
       },
       "confirm": {
         "title": "Add {name}",
-        "description": "Add the Wallbox charger {name}? If you set a BLE PIN in the Wallbox app, enter it below; otherwise leave it blank.",
-        "data": {
-          "pin": "BLE PIN (optional)"
-        }
+        "description": "Add the Wallbox charger {name}? No PIN is required — the charger bonds at the Bluetooth level."
       }
     },
     "abort": {

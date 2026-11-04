@@ -3,7 +3,6 @@
 DOMAIN = "wallbox_ble"
 
 CONF_ADDRESS = "address"
-CONF_PIN = "pin"
 
 # Wallbox custom GATT service advertised by the charger (from BLE scan).
 WALLBOX_SERVICE_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307"

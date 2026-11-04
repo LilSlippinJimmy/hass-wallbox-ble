@@ -142,5 +142,9 @@ def main() -> int:
     return 0
 
 
+def test_classify_mode_read_error():
+    assert main() == 0
+
+
 if __name__ == "__main__":
     sys.exit(main())

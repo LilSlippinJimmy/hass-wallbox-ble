@@ -7,6 +7,7 @@ import logging
 from datetime import timedelta
 
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from . import bapi
@@ -111,6 +112,18 @@ def merge_schedule_pending(existing: dict | None, update: dict) -> dict:
     return merged
 
 
+def halo_config_known(data: dict | None, static: dict | None) -> bool:
+    """Return True when a halo config is known (pure, HA-free helper).
+
+    The halo write (s_halocfg) needs all three fields {mode, time_s, bright},
+    so a partial update is only safe when the charger's current halo config has
+    already been read. A False result means `async_set_halo` must refuse the
+    write (raise HomeAssistantError) rather than inventing hardcoded defaults
+    that could silently turn the halo on / reset its timer.
+    """
+    return bool((data or {}).get("halo") or (static or {}).get("halo"))
+
+
 class WallboxBleCoordinator(DataUpdateCoordinator):
     """Polls the charger over BLE and caches status + schedules."""
 
@@ -118,7 +131,6 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         self,
         hass: HomeAssistant,
         address: str,
-        pin: str | None,
         scan_interval: int = 15,
     ) -> None:
         super().__init__(
@@ -128,11 +140,10 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             update_interval=timedelta(seconds=scan_interval),
         )
         self._address = address
-        self._pin = pin
         # The client owns a persistent BLE connection on its own background
         # task (started in __init__.py via start_client); the coordinator is a
         # thin poller that checks `ready` and funnels every op through it.
-        self._client = WallboxBleClient(hass, address, pin)
+        self._client = WallboxBleClient(hass, address)
         # Tolerate transient BLE contention (phone app grabbing the single BLE
         # slot) — keep serving the last-known data for a few failed cycles
         # instead of blanking every entity to "unavailable" on one miss.
@@ -144,6 +155,10 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         # them every cycle would just add BLE traffic for nothing.
         self._static: dict = {}
         self._static_fetched = False
+        # The halo config is tracked separately from the other static items: a
+        # successful serial/fw/mac read must NOT permanently skip a halo read
+        # that failed, so halo keeps being retried until it is obtained once.
+        self._halo_fetched = False
         # Per-slot debounce for Time-entity edits. Each sid gets a staged
         # {start,stop,days,max_current} buffer and its own flush handle so a
         # start-then-stop double-edit coalesces into ONE w_sch write, and edits
@@ -168,37 +183,47 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         (e.g. after a firmware update). Only the OCPP `e` flag is kept — the
         OCPP URL/password/chargepoint-id are secrets and are discarded here.
         """
-        static: dict = {}
+        # The genuinely-static items (serial/fw/mac/ocpp/timezone) are read ONCE
+        # and never again. The halo config, however, is retried on later polls
+        # until it is obtained, because changing only (say) brightness needs the
+        # current config and a one-off failed read must not skip it forever.
+        if not self._static_fetched:
+            static: dict = {}
 
-        serial = await self._client.request(bapi.MET_GET_SERIAL)
-        if isinstance(serial, str):
-            static["serial"] = serial
+            serial = await self._client.request(bapi.MET_GET_SERIAL)
+            if isinstance(serial, str):
+                static["serial"] = serial
 
-        fw = await self._client.request(bapi.MET_GET_FW_VERSION)
-        if fw is not None:
-            static["fw_version"] = fw
+            fw = await self._client.request(bapi.MET_GET_FW_VERSION)
+            if fw is not None:
+                static["fw_version"] = fw
 
-        mac = await self._client.request(bapi.MET_GET_MAC)
-        if isinstance(mac, dict):
-            static["wlan_mac"] = mac.get("wlan_mac")
+            mac = await self._client.request(bapi.MET_GET_MAC)
+            if isinstance(mac, dict):
+                static["wlan_mac"] = mac.get("wlan_mac")
 
-        ocpp = await self._client.request(bapi.MET_GET_OCPP)
-        if isinstance(ocpp, dict):
-            # Keep ONLY the enabled flag. Never store chid/pw/u (secrets).
-            static["ocpp_enabled"] = bool(ocpp.get("e"))
+            ocpp = await self._client.request(bapi.MET_GET_OCPP)
+            if isinstance(ocpp, dict):
+                # Keep ONLY the enabled flag. Never store chid/pw/u (secrets).
+                static["ocpp_enabled"] = bool(ocpp.get("e"))
 
-        tzinfo = await self._client.request(bapi.MET_GET_TIMEZONE)
-        if isinstance(tzinfo, dict):
-            static["timezone"] = tzinfo.get("timezone")
+            tzinfo = await self._client.request(bapi.MET_GET_TIMEZONE)
+            if isinstance(tzinfo, dict):
+                static["timezone"] = tzinfo.get("timezone")
 
-        halo = await self._client.request(bapi.MET_GET_HALO)
-        if isinstance(halo, dict):
-            static["halo"] = halo
+            if static:
+                # Merge (don't clobber a halo already fetched on an earlier poll).
+                self._static.update(static)
+                self._static_fetched = True
+                _LOGGER.debug("Fetched static Wallbox info: %s", list(static))
 
-        if static:
-            self._static = static
-            self._static_fetched = True
-            _LOGGER.debug("Fetched static Wallbox info: %s", list(static))
+        # Halo: retry every call until obtained once (then stop re-reading it).
+        if not self._halo_fetched:
+            halo = await self._client.request(bapi.MET_GET_HALO)
+            if isinstance(halo, dict):
+                self._static["halo"] = halo
+                self._halo_fetched = True
+                _LOGGER.debug("Fetched Wallbox halo config")
 
     async def _poll_once(self) -> dict | None:
         """One poll attempt. Returns the data dict, or None if the link isn't
@@ -206,8 +231,10 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         if not self._client.ready:
             return None
 
-        # One-time static reads (firmware/MAC/OCPP/serial).
-        if not self._static_fetched:
+        # One-time static reads (firmware/MAC/OCPP/serial), plus the halo config
+        # which is retried until obtained. _fetch_static guards the genuinely
+        # static items internally so they aren't re-read once fetched.
+        if not self._static_fetched or not self._halo_fetched:
             await self._fetch_static()
 
         prev = self.data or {}
@@ -382,10 +409,9 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             return {"ok": False, "reason": "at_least_one_day_required"}
         start = _clean4(slot.get("start"))
         stop = _clean4(slot.get("stop"))
-        mcr = slot.get("mcr")
         return await self.async_set_schedule(
             start, stop, sid=int(sid), days=new_days & 0x7F,
-            days_are_sunfirst=True, max_current=mcr,
+            days_are_sunfirst=True,
         )
 
     async def async_set_halo(
@@ -398,14 +424,26 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         read-modify-write: start from the last-known halo config and override
         only the field(s) given, so changing brightness doesn't wipe the mode
         (and vice-versa). Re-reads afterwards to confirm and refresh entities.
+
+        If no halo config is known yet (neither live data nor cached static),
+        the write is REFUSED (HomeAssistantError) rather than inventing
+        hardcoded defaults — a partial update must never guess the other fields.
         """
         import json
 
+        # Refuse a partial update when the current halo config is unknown: with
+        # no known values we'd have to invent defaults, which can silently turn
+        # the halo on or reset its timer. Wait until the charger has been read.
+        if not halo_config_known(self.data, self._static):
+            raise HomeAssistantError(
+                "Current halo configuration unknown; cannot safely apply a "
+                "partial update yet — try again once the charger has been read."
+            )
         current = dict((self.data or {}).get("halo") or self._static.get("halo") or {})
         new = {
-            "mode": int(mode if mode is not None else current.get("mode", 1)),
-            "time_s": int(time_s if time_s is not None else current.get("time_s", 10)),
-            "bright": int(bright if bright is not None else current.get("bright", 100)),
+            "mode": int(mode if mode is not None else current.get("mode")),
+            "time_s": int(time_s if time_s is not None else current.get("time_s")),
+            "bright": int(bright if bright is not None else current.get("bright")),
         }
         par = json.dumps(new, separators=(",", ":"))
         _LOGGER.debug("Setting halo s_halocfg=%s", par)
@@ -506,13 +544,10 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         days = pending.get("days")
         if days is None:
             days = int(slot.get("days", 127) or 127) & 0x7F
-        mcr = pending.get("max_current")
-        if mcr is None:
-            mcr = slot.get("mcr")
 
         return await self.async_set_schedule(
             start, stop, sid=int(sid), days=int(days) & 0x7F,
-            days_are_sunfirst=True, max_current=mcr,
+            days_are_sunfirst=True,
         )
 
     async def async_set_schedule(
@@ -523,8 +558,6 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         sid: int = 0,
         days: int = 127,
         days_are_sunfirst: bool = False,
-        max_current: int | None = None,  # noqa: ARG002 - not carried by w_sch
-        enable: bool = True,             # noqa: ARG002 - not carried by w_sch
     ) -> dict | None:
         """Write/replace one charging schedule slot using the legacy packed
         w_sch format this firmware uses.

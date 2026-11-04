@@ -43,29 +43,25 @@ _LOGGER = logging.getLogger(__name__)
 WALLBOX_SERVICE_UUID = "331a36f5-2459-45ea-9d95-6142f0c4b307"
 UART_RX_CHAR_UUID = "a9da6040-0823-4995-94ec-9ce41ca28833"  # write to charger
 UART_TX_CHAR_UUID = "a73e9a10-628f-4494-a099-12efaf72258f"  # notify from charger
-# The "mode" characteristic. The official Wallbox app READS this protected
-# characteristic to trigger on-demand SMP encryption/bonding, instead of forcing
-# a bond up front (decompiled app `vt\e.java` triggerBonding; findings report
-# §2, §3). We read it for the same purpose: a successful read means the link is
-# encrypted and usable. We never force a re-pair when this read succeeds.
+# The "mode" characteristic. Reading this protected characteristic triggers
+# on-demand SMP encryption/bonding, instead of forcing a bond up front: a
+# successful read means the link is encrypted and usable, and we never force a
+# re-pair when this read succeeds. See docs/ble-protocol.md for the model.
 MODE_CHAR_UUID = "75a9f022-af03-4e41-b4bc-9de90a47d50b"  # protected; read => encrypt
 
-# Per-operation timeout on a single write/read round-trip. The official app has
-# NO 3s per-op teardown — its only connect deadline is a ~15s whole-bringup
-# watchdog (findings §2, §4). A tight 3s timeout turned any slow reply into a
-# full reconnect (and, with the old code, another forced re-pair) — a disconnect
-# storm. So we give a single op ~8s, and on timeout RETRY the op once before
-# declaring the link dead (see OP_RETRIES). Only after the retry also times out
-# do we force a reconnect.
+# Per-operation timeout on a single write/read round-trip. A tight timeout turns
+# any slow reply into a full reconnect (and, with a force-pair path, another
+# re-pair) — a disconnect storm. So we give a single op ~8s, and on timeout
+# RETRY the op once before declaring the link dead (see OP_RETRIES). Only after
+# the retry also times out do we force a reconnect. See docs/ble-protocol.md.
 OP_TIMEOUT = 8.0
 # Number of extra attempts for a single op after the first times out, before the
 # link is declared a zombie. 1 => up to two attempts total.
 OP_RETRIES = 1
-# Whole-connection bring-up watchdog, matching the app's ~15s connect timeout
-# (findings §2: `wt\e.java` postDelayed(..., 15000L)). Bounds the connect +
-# encrypt + subscribe sequence so a stuck bring-up recycles instead of hanging
-# the background task forever. This is a bring-up liveness bound, NOT a per-op
-# value — the two are deliberately decoupled (P3).
+# Whole-connection bring-up watchdog. Bounds the connect + encrypt + subscribe
+# sequence so a stuck bring-up recycles instead of hanging the background task
+# forever. This is a bring-up liveness bound, NOT a per-op value — the two are
+# deliberately decoupled. See docs/ble-protocol.md.
 CONNECT_WATCHDOG = 15.0
 
 # Exponential reconnect back-off bounds.
@@ -76,8 +72,8 @@ BACKOFF_CAP = 120.0
 # --- Pure helper: classify a BlueZ/bleak error from the mode-char read -------
 # Kept HA-free and side-effect-free so it can be unit-tested without bleak or a
 # charger. It decides what a failed protected-characteristic read means, mapping
-# the app's GATT status handling (findings §2 "Error handling that matters for
-# code 8") onto the string errors BlueZ/bleak surface in HA:
+# GATT status handling onto the string errors BlueZ/bleak surface in HA
+# (see docs/ble-protocol.md):
 #
 #   "encryption_needed" — the read failed because the link is not yet encrypted
 #       / not authenticated (GATT 5 InsufficientAuthentication, 15/143
@@ -88,7 +84,7 @@ BACKOFF_CAP = 120.0
 #       ("already exists", "AuthenticationFailed"). On an ALREADY-bonded device
 #       these mean "the bond is there, stop trying to re-pair"; they are
 #       NON-FATAL — we continue to subscribe. Forcing a re-pair here is exactly
-#       what produced the `Insufficient authorization (8)` drop (findings §5.a).
+#       what produced the `Insufficient authorization (8)` drop.
 #   "fatal" — anything else (disconnected, GATT error we don't recognise): let
 #       the connect cycle treat it as a failure and recycle the link.
 
@@ -191,12 +187,9 @@ class WallboxBleClient:
     / `request_many()`.
     """
 
-    def __init__(
-        self, hass: HomeAssistant, address: str, pin: str | None = None
-    ) -> None:
+    def __init__(self, hass: HomeAssistant, address: str) -> None:
         self._hass = hass
         self._address = address
-        self._pin = pin
         self._client: BleakClientWithServiceCache | None = None
         self._agent_bus: object | None = None
         self._parser = bapi.ResponseParser()
@@ -288,10 +281,10 @@ class WallboxBleClient:
                 )
                 _LOGGER.debug("Connected to %s", self._address)
 
-                # Bring the link fully up — encrypt (the app's way) + subscribe —
-                # under a single ~15s watchdog, matching the official app's only
-                # connect deadline (findings §2/§4). This is a whole-bringup
-                # bound, deliberately NOT the tiny per-op timeout (P3).
+                # Bring the link fully up — encrypt + subscribe — under a single
+                # ~15s bring-up watchdog. This is a whole-bringup bound,
+                # deliberately NOT the tiny per-op timeout (see
+                # docs/ble-protocol.md).
                 await asyncio.wait_for(
                     self._bring_up_link(), CONNECT_WATCHDOG
                 )
@@ -332,26 +325,26 @@ class WallboxBleClient:
             backoff = min(backoff * 2, BACKOFF_CAP)
 
     async def _bring_up_link(self) -> None:
-        """Encrypt the link the way the official app does, then subscribe.
+        """Encrypt the link via on-demand bonding, then subscribe.
 
-        This replaces the old "force a re-pair on every connect" path, which was
+        This replaces an old "force a re-pair on every connect" path, which was
         the PRIMARY cause of `Insufficient authorization (8)` + mid-handshake
-        drops (findings §5.a). The app's model (findings §2, §6 P1/P2):
+        drops. The model (see docs/ble-protocol.md):
 
-          * It NEVER re-bonds a device that is already bonded. It checks bond
-            state and only arms the bond flow when the device is NOT bonded.
-          * It establishes encryption ON DEMAND by READING a protected
-            characteristic (the "mode" char). On BlueZ, reading an
-            encryption-protected characteristic makes the stack negotiate
-            security on demand — which is exactly what we want.
+          * NEVER re-bond a device that is already bonded. Check bond state and
+            only arm the bond flow when the device is NOT bonded.
+          * Establish encryption ON DEMAND by READING a protected characteristic
+            (the "mode" char). On BlueZ, reading an encryption-protected
+            characteristic makes the stack negotiate security on demand — which
+            is exactly what we want.
           * A bare createBond()/bluetooth_device_pair() is only ever the
             RECOVERY step after an encryption/authentication failure, and only
             when not already bonded.
 
-        Sequence here (P1 -> P2 -> fallback -> subscribe):
-          1. Read bond state (P1). Non-fatal if unreadable -> 'unknown'.
-          2. Read the mode char (P2). Success => link is encrypted/usable; do
-             NOT pair. Proceed to subscribe.
+        Sequence here (bond-state -> mode-read -> fallback -> subscribe):
+          1. Read bond state. Non-fatal if unreadable -> 'unknown'.
+          2. Read the mode char. Success => link is encrypted/usable; do NOT
+             pair. Proceed to subscribe.
           3. On a read failure, classify it:
                - 'already_authorized' (GATT 8 etc.): the bond exists, stop
                  trying to re-pair -> treat as NON-FATAL, continue to subscribe.
@@ -361,12 +354,11 @@ class WallboxBleClient:
                  cycle recycles the link.
              The key invariant: NEVER force a re-pair on an already-bonded
              device.
-          4. start_notify on TX (the app subscribes TX then RX; we only need TX
-             for BAPI responses). No MTU request (findings §4/§5: BGX stays at
-             the default 23-byte MTU).
+          4. start_notify on TX (we only need TX for BAPI responses). No MTU
+             request (the charger stays at the default 23-byte MTU).
         """
-        # 1. Bond state (P1). Maps the app's Android BOND_BONDED to BlueZ
-        #    Device1.Paired. None => couldn't read it; treat as 'unknown'.
+        # 1. Bond state. Maps Android BOND_BONDED to BlueZ Device1.Paired.
+        #    None => couldn't read it; treat as 'unknown'.
         bonded = await self._is_bonded()
         _LOGGER.debug(
             "Wallbox %s bond state: %s", self._address,
@@ -392,7 +384,7 @@ class WallboxBleClient:
                 # existing bond these mean "the bond is already there" — NOT a
                 # reason to re-pair. Reads/writes work on the existing bond, so
                 # continue to subscribe. This is the exact case that used to
-                # trigger the disconnect storm (findings §5.a).
+                # trigger the disconnect storm.
                 _LOGGER.debug(
                     "Treating authorization result as already-bonded; continuing "
                     "without re-pair",
@@ -439,8 +431,8 @@ class WallboxBleClient:
     async def _is_bonded(self) -> bool | None:
         """Return True/False if BlueZ bond state is readable, else None.
 
-        Maps Android BOND_BONDED -> BlueZ org.bluez Device1.Paired (findings
-        §6 P1, marked INFERRED there). Best-effort: inspects the bleak BlueZ
+        Maps Android BOND_BONDED -> BlueZ org.bluez Device1.Paired (inferred).
+        Best-effort: inspects the bleak BlueZ
         backend's cached device properties; any failure degrades to None
         ('unknown') rather than crashing the background task.
         """
@@ -634,12 +626,11 @@ class WallboxBleClient:
     async def _request_locked(self, met: str, par: str) -> dict | None:
         """One write/read round-trip. Caller MUST hold `self._lock`.
 
-        P3 — decouple "slow reply" from "dead link": on a per-op TIMEOUT we RETRY
-        the op once (OP_RETRIES) before declaring the link a zombie. The official
-        app has no 3s per-op teardown — only a ~15s bring-up watchdog (findings
-        §2/§4) — so one slow reply must NOT single-handedly tear the link down
-        (and, with the old code, force a re-pair). Only after the retry also
-        times out do we fire `_disconnected` to recycle the link.
+        Decouple "slow reply" from "dead link": on a per-op TIMEOUT we RETRY the
+        op once (OP_RETRIES) before declaring the link a zombie — one slow reply
+        must NOT single-handedly tear the link down (and, with an old force-pair
+        path, force a re-pair). Only after the retry also times out do we fire
+        `_disconnected` to recycle the link. See docs/ble-protocol.md.
         """
         parsed: dict | None = None
         for attempt in range(OP_RETRIES + 1):

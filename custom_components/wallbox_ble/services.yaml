@@ -68,16 +68,6 @@ set_schedule:
       example: [mon, wed, fri]
       selector:
         object:
-    max_current:
-      name: Max current
-      description: Max charging current in amps for this schedule.
-      required: false
-      example: 32
-      selector:
-        number:
-          min: 6
-          max: 32
-          unit_of_measurement: "A"
     timezone:
       name: Timezone
       description: >-
@@ -91,6 +81,15 @@ set_schedule:
           options:
             - "local"
             - "utc"
+    device_id:
+      name: Charger
+      description: >-
+        Which Wallbox charger to write to. Omit to use the only charger when a
+        single one is configured; required when more than one is set up.
+      required: false
+      selector:
+        device:
+          integration: wallbox_ble
 
 set_schedule_full:
   name: Set schedule (atomic, all fields)
@@ -137,16 +136,6 @@ set_schedule_full:
       example: [mon, wed, fri]
       selector:
         object:
-    max_current:
-      name: Max current
-      description: Max charging current in amps for this schedule.
-      required: false
-      example: 32
-      selector:
-        number:
-          min: 6
-          max: 32
-          unit_of_measurement: "A"
     timezone:
       name: Timezone
       description: >-
@@ -160,6 +149,15 @@ set_schedule_full:
           options:
             - "local"
             - "utc"
+    device_id:
+      name: Charger
+      description: >-
+        Which Wallbox charger to write to. Omit to use the only charger when a
+        single one is configured; required when more than one is set up.
+      required: false
+      selector:
+        device:
+          integration: wallbox_ble
 
 delete_schedule:
   name: Delete schedule
@@ -179,3 +177,12 @@ delete_schedule:
           min: 0
           max: 4
           mode: box
+    device_id:
+      name: Charger
+      description: >-
+        Which Wallbox charger to delete from. Omit to use the only charger when
+        a single one is configured; required when more than one is set up.
+      required: false
+      selector:
+        device:
+          integration: wallbox_ble

@@ -5,8 +5,8 @@ Supports two entry paths:
     service UUID / name and offered as a discovered device.
   - Manual user add: pick from the Wallbox chargers currently visible to
     Home Assistant's Bluetooth.
-In both cases an optional BLE PIN can be supplied (only needed if a PIN is
-set in the Wallbox app).
+No PIN is required: the charger bonds at the OS/Bluetooth level (there is no
+application-layer PIN/auth handshake).
 """
 from __future__ import annotations
 
@@ -27,10 +27,8 @@ from homeassistant.config_entries import (
 )
 from homeassistant.const import CONF_ADDRESS
 from homeassistant.core import callback
-from homeassistant.helpers import config_validation as cv
 
 from .const import (
-    CONF_PIN,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -80,19 +78,16 @@ class WallboxBleConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_confirm(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Confirm adding a discovered charger (optionally with a PIN)."""
+        """Confirm adding a discovered charger (no PIN: bonds at the OS level)."""
         if user_input is not None:
             return self.async_create_entry(
                 title=self._discovered_name or "Wallbox",
-                data={
-                    CONF_ADDRESS: self._discovered_address,
-                    CONF_PIN: user_input.get(CONF_PIN) or None,
-                },
+                data={CONF_ADDRESS: self._discovered_address},
             )
 
         return self.async_show_form(
             step_id="confirm",
-            data_schema=vol.Schema({vol.Optional(CONF_PIN): cv.string}),
+            data_schema=vol.Schema({}),
             description_placeholders={
                 "name": self._discovered_name or self._discovered_address
             },
@@ -108,10 +103,7 @@ class WallboxBleConfigFlow(ConfigFlow, domain=DOMAIN):
             self._abort_if_unique_id_configured()
             return self.async_create_entry(
                 title=self._candidates.get(address, "Wallbox"),
-                data={
-                    CONF_ADDRESS: address,
-                    CONF_PIN: user_input.get(CONF_PIN) or None,
-                },
+                data={CONF_ADDRESS: address},
             )
 
         # Build the list of currently-visible Wallbox chargers.
@@ -132,7 +124,6 @@ class WallboxBleConfigFlow(ConfigFlow, domain=DOMAIN):
             data_schema=vol.Schema(
                 {
                     vol.Required(CONF_ADDRESS): vol.In(self._candidates),
-                    vol.Optional(CONF_PIN): cv.string,
                 }
             ),
         )

@@ -21,7 +21,6 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 
 from .const import (
-    CONF_PIN,
     CONF_SCAN_INTERVAL,
     DEFAULT_SCAN_INTERVAL,
     DOMAIN,
@@ -54,11 +53,13 @@ _PROBE_READS = (
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Wallbox BLE from a config entry."""
+    # NB: older entries may still carry a stored "pin" key in entry.data; it is
+    # intentionally no longer read (the charger has no app-level PIN — it bonds
+    # at the OS/Bluetooth level), and tolerating the extra key needs no migration.
     address: str = entry.data[CONF_ADDRESS]
-    pin: str | None = entry.data.get(CONF_PIN)
     scan_interval = entry.options.get(CONF_SCAN_INTERVAL, DEFAULT_SCAN_INTERVAL)
 
-    coordinator = WallboxBleCoordinator(hass, address, pin, scan_interval)
+    coordinator = WallboxBleCoordinator(hass, address, scan_interval)
     # Start the persistent BLE connection task BEFORE the first refresh so the
     # background loop can bring the link up; the first poll tolerates a
     # not-yet-ready link (serves empty data until the link is established).
@@ -250,20 +251,88 @@ _SET_SCHEDULE_SCHEMA = vol.Schema(
         # Accepts an int bitmask (Mon-first), a day-name list, or a keyword
         # string. Parsed to a Monday-first bitmask by _parse_days.
         vol.Required("days"): _parse_days,
-        vol.Optional("max_current"): vol.All(int, vol.Range(min=6, max=32)),
         vol.Optional("timezone", default="local"): vol.In(["local", "utc"]),
+        # Target exactly one charger (device selector). Optional: when omitted
+        # and only one charger is configured, that one is used.
+        vol.Optional("device_id"): cv.string,
     }
 )
+
+
+def resolve_coordinator(
+    device_id: str | None,
+    device_entry_ids: set[str] | None,
+    domain_entry_ids: set[str],
+    coordinators_by_entry: dict,
+):
+    """Resolve a service call to exactly one coordinator (pure helper).
+
+    Split out from `_coordinator_for_device` so it can be unit-tested without
+    Home Assistant. Arguments:
+      - device_id: the device the caller targeted, or None.
+      - device_entry_ids: the config entry ids attached to that device (the
+        device registry entry's `config_entries`), or None if the device is
+        unknown. Ignored when device_id is None.
+      - domain_entry_ids: all config entry ids currently loaded for this
+        integration (the keys of hass.data[DOMAIN]).
+      - coordinators_by_entry: {entry_id: coordinator} for this integration.
+
+    Returns the single matching coordinator. Raises HomeAssistantError with a
+    clear message when the target is unknown, foreign, missing, or ambiguous.
+    """
+    if device_id is not None:
+        if device_entry_ids is None:
+            raise HomeAssistantError(
+                f"Unknown device {device_id!r}; it is not a Wallbox BLE charger."
+            )
+        matching = device_entry_ids & domain_entry_ids
+        if not matching:
+            raise HomeAssistantError(
+                f"Device {device_id!r} is not a Wallbox BLE charger."
+            )
+        # A device maps to a single config entry for this integration.
+        entry_id = next(iter(matching))
+        return coordinators_by_entry[entry_id]
+
+    # No device given: default to the sole charger if there is exactly one.
+    if len(coordinators_by_entry) == 1:
+        return next(iter(coordinators_by_entry.values()))
+    if not coordinators_by_entry:
+        raise HomeAssistantError("No Wallbox BLE charger is configured.")
+    raise HomeAssistantError(
+        "Multiple Wallbox chargers are configured; specify the target device."
+    )
+
+
+def _coordinator_for_device(hass: HomeAssistant, device_id: str | None):
+    """Resolve a service `device_id` to its coordinator for this integration.
+
+    Looks the device up in the device registry, maps it to this integration's
+    config entry, and returns that entry's coordinator. See `resolve_coordinator`
+    for the pure resolution rules (and its unit tests).
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    coordinators_by_entry = dict(hass.data.get(DOMAIN, {}))
+    domain_entry_ids = set(coordinators_by_entry)
+    device_entry_ids: set[str] | None = None
+    if device_id is not None:
+        device = dr.async_get(hass).async_get(device_id)
+        device_entry_ids = set(device.config_entries) if device is not None else None
+    return resolve_coordinator(
+        device_id, device_entry_ids, domain_entry_ids, coordinators_by_entry
+    )
 
 
 def _register_schedule_service(hass: HomeAssistant) -> None:
     """Register the set_schedule service (and its set_schedule_full alias), once.
 
     Both names run the SAME handler: one atomic BLE write that sets start, stop
-    AND days (plus optional max_current) for one slot in a single w_sch — the
-    "do it all in one request" path, so an automation doesn't have to poke the
-    per-slot Start and Stop Time entities separately (which is what races the
-    link). `set_schedule_full` is a self-documenting alias for that behaviour.
+    AND days for one slot in a single w_sch — the "do it all in one request"
+    path, so an automation doesn't have to poke the per-slot Start and Stop Time
+    entities separately (which is what races the link). `set_schedule_full` is a
+    self-documenting alias for that behaviour. The write targets exactly one
+    charger (the `device_id` field, or the only charger if unspecified).
     """
 
     async def _handle_set_schedule(call: ServiceCall) -> None:
@@ -281,14 +350,13 @@ def _register_schedule_service(hass: HomeAssistant) -> None:
             start = _clean_hhmm(data["start"])
             stop = _clean_hhmm(data["stop"])
 
-        for coordinator in list(hass.data.get(DOMAIN, {}).values()):
-            await coordinator.async_set_schedule(
-                start,
-                stop,
-                sid=data["sid"],
-                days=data["days"],
-                max_current=data.get("max_current"),
-            )
+        coordinator = _coordinator_for_device(hass, data.get("device_id"))
+        await coordinator.async_set_schedule(
+            start,
+            stop,
+            sid=data["sid"],
+            days=data["days"],
+        )
 
     for service in (SERVICE_SET_SCHEDULE, SERVICE_SET_SCHEDULE_FULL):
         if not hass.services.has_service(DOMAIN, service):
@@ -300,6 +368,9 @@ def _register_schedule_service(hass: HomeAssistant) -> None:
 _DELETE_SCHEDULE_SCHEMA = vol.Schema(
     {
         vol.Required("sid"): vol.All(int, vol.Range(min=0, max=4)),
+        # Target exactly one charger (device selector). Optional: when omitted
+        # and only one charger is configured, that one is used.
+        vol.Optional("device_id"): cv.string,
     }
 )
 
@@ -317,8 +388,8 @@ def _register_delete_schedule_service(hass: HomeAssistant) -> None:
 
     async def _handle_delete_schedule(call: ServiceCall) -> None:
         data = _DELETE_SCHEDULE_SCHEMA(dict(call.data))
-        for coordinator in list(hass.data.get(DOMAIN, {}).values()):
-            await coordinator.async_delete_schedule(data["sid"])
+        coordinator = _coordinator_for_device(hass, data.get("device_id"))
+        await coordinator.async_delete_schedule(data["sid"])
 
     hass.services.async_register(
         DOMAIN,

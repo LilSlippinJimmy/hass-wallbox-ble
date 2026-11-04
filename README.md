@@ -81,10 +81,18 @@ when you open the app, or when the phone comes into range).
 
 ## Installation
 
-### Option A — HACS (custom repository)
+### Option A — HACS (search)
 
-> This integration is not yet in the default HACS list. You can add it as a
-> custom repository today; official HACS inclusion is planned.
+1. In Home Assistant, open **HACS → Integrations**.
+2. Search for **Wallbox BLE** and open it.
+3. Click **Download**.
+4. **Restart Home Assistant.**
+
+> If **Wallbox BLE** doesn't appear in the search yet, use Option B below to add
+> it as a custom repository — it will move into the default HACS list once
+> listed.
+
+### Option B — HACS (custom repository)
 
 1. In Home Assistant, open **HACS → Integrations**.
 2. Click the three-dot menu (top right) → **Custom repositories**.
@@ -94,7 +102,7 @@ when you open the app, or when the phone comes into range).
 4. Find **Wallbox BLE (Local)** in HACS and click **Download**.
 5. **Restart Home Assistant.**
 
-### Option B — Manual
+### Option C — Manual
 
 1. Download this repository (Code → Download ZIP, or `git clone`).
 2. Copy the `custom_components/wallbox_ble` folder into your Home Assistant
@@ -118,8 +126,11 @@ After installing and restarting:
   Wallbox BLE (Local)**, then pick your charger from the list of Wallbox devices
   currently visible to Home Assistant's Bluetooth.
 
-If your charger has a **BLE PIN** set in the Wallbox app, enter it when prompted.
-Most chargers without a PIN pair automatically ("Just Works").
+**No PIN is required.** This integration does not use an app-level BLE PIN — the
+charger bonds at the OS/Bluetooth level ("Just Works"), and there is no
+application-layer PIN or auth handshake to enter. See
+[docs/ble-protocol.md](docs/ble-protocol.md) for the connection/encryption
+model.
 
 ### Options
 
@@ -236,8 +247,8 @@ Write/replace a single schedule slot.
 | `stop` | yes | Stop time, `HHMM` (e.g. `0230`). |
 | `sid` | no (default 0) | Schedule slot 0–4. |
 | `days` | **yes** | Which days the schedule runs. A list of day names (`[mon, wed, fri]`), a keyword (`all`, `weekdays`, `weekends`), a comma string (`"mon,wed,fri"`), or a Monday-first bitmask integer. Must resolve to at least one day. |
-| `max_current` | no | Max charging current (A). |
 | `timezone` | no (default `local`) | `local` converts local wall-clock to the UTC the charger stores; `utc` sends as-is. |
+| `device_id` | no | Which charger to write to. Omit to target the only charger when a single one is configured; required when more than one is set up. |
 
 ```yaml
 action: wallbox_ble.set_schedule
@@ -251,6 +262,11 @@ data:
 
 ### `wallbox_ble.delete_schedule`
 Delete a schedule slot (see [how it works](#how-schedule-delete-works)).
+
+| Field | Required | Description |
+| --- | --- | --- |
+| `sid` | yes | Schedule slot to delete, 0–4. |
+| `device_id` | no | Which charger to delete from. Omit to target the only charger when a single one is configured; required when more than one is set up. |
 
 ```yaml
 action: wallbox_ble.delete_schedule
@@ -332,8 +348,8 @@ app renumbers.
   may be holding it. The integration reconnects automatically with back-off;
   closing the Wallbox app usually helps.
 - **Writes/schedules don't apply:** confirm the charger is in BLE range and the
-  app isn't connected. If your charger has a BLE PIN, make sure it was entered
-  during setup.
+  app isn't connected. With more than one charger configured, make sure the
+  schedule service call targets the right one via `device_id`.
 - **Enable debug logging** to see what's happening over BLE:
   ```yaml
   logger:
