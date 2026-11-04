@@ -370,12 +370,6 @@ BLE protocol:
 The BAPI framing/checksum logic adapted from that project is a Python port for
 Home Assistant's Bluetooth stack; its MIT notice ships in `THIRD_PARTY_LICENSES`.
 
-The BLE pairing-agent registration and the persistent connection loop are this
-integration's own implementation, derived from first-party API references — the
-BlueZ D-Bus agent API (`org.bluez.AgentManager1` / `org.bluez.Agent1`),
-`dbus-fast`, and `bleak` / `bleak-retry-connector`. The connection and
-encryption model is documented in [`docs/ble-protocol.md`](docs/ble-protocol.md).
-
 ## License
 
 Released under the [MIT License](LICENSE).
