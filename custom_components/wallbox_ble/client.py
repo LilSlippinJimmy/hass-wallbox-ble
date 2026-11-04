@@ -1,12 +1,18 @@
 """BLE client for a Wallbox Pulsar charger using Home Assistant's Bluetooth stack.
 
 Speaks the BAPI protocol over the charger's custom UART-style GATT service.
-The Pulsar Plus requires a BLE pair, which only succeeds when a
-NoInputNoOutput BlueZ agent is registered to auto-accept the authorization
-request (a bare client.pair() yields org.bluez.Error.AuthenticationFailed).
+The Pulsar Plus requires an encrypted (bonded) BLE link, which only completes
+when a NoInputNoOutput BlueZ agent is registered to auto-accept the pairing
+authorization (a bare client.pair() yields org.bluez.Error.AuthenticationFailed
+because no agent answers the Just-Works authorization request).
 
-Characteristics / pairing approach verified against this charger and modelled
-on the jagheterfredrik/wallbox-ble project (MIT).
+This is the integration's own implementation. The pairing-agent registration
+and the connection loop are derived from first-party API references — the BlueZ
+D-Bus agent API (`org.bluez.AgentManager1` / `org.bluez.Agent1`), the dbus-fast
+library's ServiceInterface/@method export API, and the bleak /
+bleak-retry-connector connect lifecycle — not from any third-party integration.
+The GATT UUIDs and BAPI protocol facts below are verified against this charger.
+See docs/ble-protocol.md for the connection/encryption model this code follows.
 
 Connection model (persistent):
   A single background asyncio task (`_run`) owns the BLE link for the lifetime
@@ -135,8 +141,24 @@ def classify_mode_read_error(err: BaseException | str) -> str:
     return "fatal"
 
 
+# Object path we export our own agent under on the D-Bus. BlueZ treats this as
+# a freely-definable local name (see the org.bluez.Agent1 doc: "Object path:
+# freely definable"), so it is purely a label for OUR object — namespaced under
+# the integration so it is unambiguously this project's own agent.
+_AGENT_PATH = "/org/homeassistant/wallbox_ble/agent"
+
+
 async def _register_pairing_agent() -> object | None:
     """Register a NoInputNoOutput BlueZ pairing agent that auto-accepts.
+
+    Implemented against the BlueZ D-Bus agent API (doc/org.bluez.AgentManager1
+    RegisterAgent + doc/org.bluez.Agent1) and the dbus-fast ServiceInterface /
+    @method export API. The charger pairs with the Just-Works model (no display
+    or keypad on either end), so the agent advertises the `NoInputNoOutput`
+    capability and answers the authorization/confirmation callbacks BlueZ makes
+    during that flow by returning without error, which tells bluetoothd to
+    accept the bond. This is what lets a first-time bond complete with no user
+    interaction; see docs/ble-protocol.md.
 
     Returns the dbus message bus (keep it alive for the connection, disconnect
     on cleanup), or None if the agent could not be registered.
@@ -150,29 +172,51 @@ async def _register_pairing_agent() -> object | None:
         return None
 
     class _AgentInterface(ServiceInterface):
+        """org.bluez.Agent1 implementation for Just-Works auto-accept.
+
+        Only the callbacks a NoInputNoOutput agent can receive are handled. Each
+        returns normally, which BlueZ reads as "accepted"; raising instead would
+        reject the pairing. The parameter type annotations ("o" object path,
+        "s" string, "u" uint32) are the D-Bus signatures dbus-fast uses to
+        marshal each method, taken from the Agent1 API definition.
+        """
+
         def __init__(self) -> None:
             super().__init__("org.bluez.Agent1")
 
         @method()
+        def Release(self):  # noqa: N802
+            # bluetoothd calls this when it drops our agent; nothing to clean up.
+            return
+
+        @method()
+        def RequestConfirmation(self, device: "o", passkey: "u"):  # noqa: F821, N802
+            # Just-Works has no real passkey to compare; returning accepts it.
+            return
+
+        @method()
         def RequestAuthorization(self, device: "o"):  # noqa: F821, N802
+            # Authorize the incoming Just-Works pairing attempt.
             return
 
         @method()
         def AuthorizeService(self, device: "o", uuid: "s"):  # noqa: F821, N802
+            # Authorize the service/connection request.
             return
 
         @method()
         def Cancel(self):  # noqa: N802
+            # bluetoothd aborted the request before a reply; nothing to do.
             return
 
     try:
         bus = await MessageBus(bus_type=BusType.SYSTEM, negotiate_unix_fd=True).connect()
-        bus.export("/wallbox/agent", _AgentInterface())
+        bus.export(_AGENT_PATH, _AgentInterface())
         introspection = await bus.introspect("org.bluez", "/org/bluez")
         obj = bus.get_proxy_object("org.bluez", "/org/bluez", introspection)
         agent_manager = obj.get_interface("org.bluez.AgentManager1")
-        await agent_manager.call_register_agent("/wallbox/agent", "NoInputNoOutput")
-        _LOGGER.debug("Wallbox BLE pairing agent registered")
+        await agent_manager.call_register_agent(_AGENT_PATH, "NoInputNoOutput")
+        _LOGGER.debug("Wallbox BLE pairing agent registered at %s", _AGENT_PATH)
         return bus
     except Exception as err:  # noqa: BLE001
         _LOGGER.warning("Could not register BLE pairing agent: %s", err)
@@ -501,13 +545,25 @@ class WallboxBleClient:
         except Exception as err:  # noqa: BLE001
             _LOGGER.debug("pair() high-level error: %s; trying backend path", err)
 
-        # 2. Fall back to the BlueZ backend bonding call.
+        # 2. Fall back to the BlueZ backend's own bond call. On some HA/bleak
+        #    versions the high-level pair() raises NotImplementedError, so we
+        #    reach the BlueZ backend's device-pair method directly. This walks
+        #    bleak's private backend via getattr (each hop guarded) so a bleak
+        #    internals change degrades to a logged no-op instead of an
+        #    AttributeError crash on the background task.
         try:
-            backend = self._client._backend  # noqa: SLF001
-            await backend._client.bluetooth_device_pair(  # noqa: SLF001
-                backend._address_as_int  # noqa: SLF001
-            )
-            _LOGGER.debug("Fallback bond via backend bluetooth_device_pair()")
+            backend = getattr(self._client, "_backend", None)
+            bluez_dbus = getattr(backend, "_client", None) if backend else None
+            address_int = getattr(backend, "_address_as_int", None) if backend else None
+            bond = getattr(bluez_dbus, "bluetooth_device_pair", None)
+            if bond is None or address_int is None:
+                _LOGGER.debug(
+                    "Backend bond path unavailable on this bleak version; "
+                    "leaving encryption to the mode-char retry"
+                )
+                return
+            await bond(address_int)
+            _LOGGER.debug("Fallback bond via BlueZ backend device-pair")
         except Exception as err:  # noqa: BLE001
             # Non-fatal: the mode-char retry / first real read will decide.
             _LOGGER.debug(

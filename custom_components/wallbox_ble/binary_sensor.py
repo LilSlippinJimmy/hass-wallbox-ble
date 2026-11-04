@@ -31,8 +31,7 @@ from .entity import WallboxBleEntity
 STATUS_CHARGING = 1
 
 # Status codes (r_sta.charger_status / r_dat.st) that mean a car is connected.
-# Values are the Wallbox coarse status enum (decompiled app a71/a.java,
-# EnumC0023a):
+# These are the charger's coarse status enum values, observed on this charger:
 #   1 = Charging, 2 = Connected waiting for car, 3 = Connected waiting for
 #   schedule, 4 = Paused, 5 = Schedule ended, 8 = Connected waiting for current
 #   assignation, 15 = OCPP charge finishing (connected; seen on an
@@ -41,6 +40,7 @@ STATUS_CHARGING = 1
 #   Waiting-to-unlock (connected while OCPP-locked), 20 = Establishing-
 #   connection, 21 = Connected low battery.
 #   0 (Ready, no car) and 6 (Locked, no car) are deliberately NOT in the set.
+# See docs/ble-protocol.md for the full status-code table and its provenance.
 STATUS_CODES_CAR_CONNECTED = frozenset({1, 2, 3, 4, 5, 8, 15, 19, 20, 21})
 
 

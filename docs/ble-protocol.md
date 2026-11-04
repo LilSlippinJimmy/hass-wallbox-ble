@@ -88,3 +88,59 @@ back-off resets only after a successful connect and first successful read.
 Requests fail fast: when the link is not ready, `request()` returns `None`
 immediately instead of blocking, so polls and on-demand commands never hammer a
 dead characteristic while the background task reconnects.
+
+## Status-code enums
+
+The charger reports its state as small integer enums in the BAPI payloads. The
+tables below were recovered by inspecting the official Wallbox Android app and
+then confirmed against live readings from this charger. They are protocol facts,
+not copied code; the integration carries only the numeric values and plain-text
+labels it needs.
+
+### Charger status (`r_dat.st` / `r_sta.charger_status`)
+
+| Code | Meaning |
+|------|---------|
+| 0 | Ready (no car) |
+| 1 | Charging |
+| 2 | Connected: waiting for car |
+| 3 | Connected: waiting for schedule |
+| 4 | Paused |
+| 5 | Schedule ended |
+| 6 | Locked (no car) |
+| 7 | Error |
+| 8 | Connected: waiting for current assignation |
+| 9 | Unconfigured power sharing |
+| 10 | Queued by Power Boost |
+| 11 | Discharging |
+| 12 | Connected: waiting MID admin auth |
+| 13 | Connected: MID safety margin |
+| 14 | OCPP unavailable |
+| 15 | OCPP charge finishing (connected) |
+| 16 | OCPP reserved |
+| 17 | Updating |
+| 18 | Queued by Eco-Smart |
+| 19 | Waiting-to-unlock (connected while OCPP-locked) |
+| 20 | Establishing connection |
+| 21 | Connected: low battery |
+
+"Car connected" is derived from this enum as the set {1, 2, 3, 4, 5, 8, 15, 19,
+20, 21}; codes 0 (Ready) and 6 (Locked) mean no car. On an OCPP-locked charger a
+connected car surfaces on the realtime status (code 19, waiting-to-unlock) while
+the basic `r_dat.st` stays at 6 (Locked), which is why plug detection prefers
+`r_sta.charger_status`.
+
+### OCPP backend connection status (`r_dat.ocpp` / `r_sta.ocpp_status`)
+
+| Code | Meaning |
+|------|---------|
+| 0 | Not activated |
+| 1 | Not configured |
+| 2 | Connection error |
+| 3 | Connection rejected |
+| 4 | Connected |
+| 6 | Certificate validation failed |
+
+This live backend-connection status is distinct from the static "OCPP enabled"
+configuration flag (`g_ocpp.e`), which only says whether the charger is managed
+by an OCPP backend at all.

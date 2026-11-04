@@ -48,10 +48,10 @@ def status_label(code) -> str | None:
         return f"Unknown ({code})" if code is not None else None
 
 
-# OCPP backend connection state, from r_dat.ocpp / r_sta.ocpp_status.
-# Values verified from the Wallbox app (enum l41.d2). This is the live
-# connection status to the OCPP backend (e.g. Octopus), distinct from the
-# static "OCPP enabled" config flag (g_ocpp.e).
+# OCPP backend connection state, from r_dat.ocpp / r_sta.ocpp_status. This is
+# the live connection status to the OCPP backend (e.g. Octopus), distinct from
+# the static "OCPP enabled" config flag (g_ocpp.e). See docs/ble-protocol.md for
+# the status-code tables and their provenance.
 OCPP_STATUS_CODES = {
     0: "Not activated",
     1: "Not configured",

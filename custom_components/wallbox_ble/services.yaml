@@ -94,8 +94,8 @@ set_schedule:
 set_schedule_full:
   name: Set schedule (atomic, all fields)
   description: >-
-    Set START and STOP and DAYS (and optional max current) for ONE schedule
-    slot in a SINGLE BLE write. Identical to set_schedule — provided as a
+    Set START and STOP and DAYS for ONE schedule slot in a SINGLE BLE write.
+    Identical to set_schedule — provided as a
     self-documenting "do it all in one request" path so an automation can set
     a whole slot at once instead of poking the per-slot Start/Stop time
     entities separately (which can race the BLE link). Times are HHMM.
