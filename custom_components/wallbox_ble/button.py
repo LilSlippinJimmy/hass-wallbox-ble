@@ -1,8 +1,9 @@
 """Button platform for Wallbox BLE.
 
 A per-slot "Delete schedule" button for each schedule slot (0-3). Pressing it
-removes that slot and compacts the remaining schedules down (this firmware has
-no native per-slot delete command — see coordinator.async_delete_schedule).
+removes that slot: the coordinator tries the native clr_sch delete first and
+falls back to rewriting/compacting the schedule table if this firmware rejects
+it (see coordinator.async_delete_schedule).
 
 The button is only *available* when the slot actually holds an active
 schedule, so you can't delete an empty slot by accident.

@@ -58,6 +58,21 @@ MET_SET_CURRENT = "w_mxI"     # set max charging current (plain int amps)
 MET_REBOOT = "rebot"          # reboot the charger
 MET_SET_ADV_SCHED = "s_sch"   # advanced schedule write — NOT supported on this
                               # firmware ("No dispatch method found").
+MET_DEL_SCHED = "clr_sch"     # per-slot schedule delete (BAPI DELETE_SCHEDULES).
+# NATIVE single-slot delete, as the official Wallbox app does it over BLE.
+# Parameter is a JSON OBJECT with ONE field whose key is "sid" and whose value
+# is a JSON ARRAY of integer slot ids:
+#     {"sid":[<id>]}            (one element = delete one slot)
+# Proven by the decompiled app: the typed payload ScheduleClearEntity carries a
+# `List<Integer>` annotated @l("sid"), and the BAPI map defines
+# DELETE_SCHEDULES="clr_sch". A PRIOR attempt in this integration concluded
+# clr_sch was unsupported ("No dispatch method found"), but it sent sid in the
+# WRONG shape (a scalar / wrong key); the ARRAY form {"sid":[n]} was never tried.
+# Like w_sch, clr_sch may send NO ack (response None/empty) — success MUST be
+# confirmed by reading r_schs back, not by the response. Because this firmware's
+# clr_sch support is unproven until field-tested, async_delete_schedule tries it
+# first and FALLS BACK to the w_sch rewrite-the-table compaction if it is
+# rejected or doesn't take.
 MET_SET_SCHED = "w_sch"       # packed schedule write (THIS firmware).
 # VERIFIED against a Pulsar Plus by batch format-testing (the read-back
 # changed only for this exact layout). w_sch takes a PACKED STRING parameter,
@@ -87,6 +102,18 @@ def build_command(met: str, par: str = "null", req_id: int = 0) -> str:
     '{"pin":"1234"}', etc. — it is inserted verbatim.
     """
     return f'{{"met":"{met}","par":{par},"id":{req_id}}}'
+
+
+def build_clr_sch_par(sid: int) -> str:
+    """Build the `par` JSON fragment for a native clr_sch single-slot delete.
+
+    Returns the exact object the app sends: ``{"sid":[<id>]}`` — key ``sid``,
+    value a one-element JSON ARRAY holding the integer slot id. This is the
+    verbatim `par` string for ``build_command("clr_sch", build_clr_sch_par(n))``.
+    Pure (no I/O) so it can be unit-tested without a charger. Content was
+    rephrased for compliance with licensing restrictions.
+    """
+    return json.dumps({"sid": [int(sid)]}, separators=(",", ":"))
 
 
 def frame(json_payload: str) -> bytes:

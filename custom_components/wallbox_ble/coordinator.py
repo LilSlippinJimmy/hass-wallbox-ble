@@ -90,6 +90,18 @@ SCHEDULE_FLUSH_DELAY = 1.2
 # How long a user-initiated schedule write will wait for the (frequently
 # churning) BLE link to become ready before giving up and deferring.
 SCHEDULE_WRITE_READY_TIMEOUT = 9.0
+# Pacing gap inserted BETWEEN consecutive w_sch writes when a single operation
+# issues several in succession (the delete-and-compact rewrite, which rewrites
+# every surviving slot). This charger keeps ONE BLE connection; firing a burst
+# of w_sch round-trips back-to-back with no gap tips that single link into a
+# drop (observed: the write lands, but the link drops before the read-back, so
+# entities briefly go "unknown"). A short gap lets the single link — and the
+# poll loop — breathe between writes. This is deliberately GENTLER, not more
+# aggressive: no shorter timeouts, no re-pair, no MTU/keepalive change (see
+# docs/ble-protocol.md, which traces the prior disconnect storm to exactly that
+# kind of aggression). A single lone write (async_set_schedule for one slot) is
+# one round-trip and does not need this gap.
+SCHEDULE_WRITE_PACING = 0.4
 
 
 def merge_schedule_pending(existing: dict | None, update: dict) -> dict:
@@ -110,6 +122,68 @@ def merge_schedule_pending(existing: dict | None, update: dict) -> dict:
         if key in update and update[key] is not None:
             merged[key] = update[key]
     return merged
+
+
+def plan_delete_compaction(before: list, sid: int) -> list[tuple[int, str, str, int]]:
+    """Plan the w_sch rewrites that delete one slot and compact the rest (pure).
+
+    HA-free and side-effect-free so it can be unit-tested without a charger.
+    `before` is the schedule list as read back from the charger (each item a
+    dict with 'sid','start','stop','days' — days already Sunday-first). `sid` is
+    the slot to remove.
+
+    Returns the ordered list of writes to issue, each a tuple
+    (pos, start_HHMM, stop_HHMM, days_sunfirst):
+
+      * Surviving slots, in their existing order, renumbered contiguously into
+        positions 0,1,2,... so no gap is left where the deleted slot was. Their
+        start/stop/days are preserved exactly as the charger stored them.
+      * Then one "clear" write (start 0000, stop 0000, days 0) for every trailing
+        position that WAS occupied but is no longer needed, so a stale slot can't
+        linger past the new compacted tail.
+
+    The returned order IS the order the writes must be issued (and paced). An
+    empty list means there is nothing to rewrite.
+    """
+    occupied_before = {int(s.get("sid")) for s in before if s.get("sid") is not None}
+    survivors = [s for s in before if int(s.get("sid", -1)) != int(sid)]
+
+    plan: list[tuple[int, str, str, int]] = []
+    for pos, s in enumerate(survivors):
+        start_s = _clean4(s.get("start"))
+        stop_s = _clean4(s.get("stop"))
+        # Days come back from the charger already Sunday-first; keep as-is.
+        sun_first = int(s.get("days", 127)) & 0x7F
+        plan.append((pos, start_s, stop_s, sun_first))
+
+    # Clear any trailing positions occupied before but no longer needed.
+    highest_before = max(occupied_before) if occupied_before else -1
+    for pos in range(len(survivors), highest_before + 1):
+        plan.append((pos, "0000", "0000", 0))
+
+    return plan
+
+
+def clr_sch_succeeded(after: list | None, sid: int) -> bool:
+    """Decide if a native clr_sch delete took, from the r_schs read-back (pure).
+
+    HA-free so it can be unit-tested without a charger. `after` is the schedule
+    list read back from the charger after sending clr_sch (each item a dict with
+    at least 'sid', and usually 'days'); `sid` is the slot we asked to delete.
+
+    The delete succeeded when the target slot is GONE — either absent from the
+    read-back entirely, or present only as an inert slot (days bitmask 0, which
+    the charger never triggers). A None/empty read-back is NOT success (we got no
+    confirmation), so this returns False and the caller falls back to the rewrite
+    compaction. Note: success is decided HERE, from the read-back, never from the
+    (possibly absent) clr_sch ack.
+    """
+    if not after:
+        return False
+    for s in after:
+        if int(s.get("sid", -1)) == int(sid) and (int(s.get("days", 0)) & 0x7F):
+            return False
+    return True
 
 
 def halo_config_known(data: dict | None, static: dict | None) -> bool:
@@ -480,8 +554,6 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         merge_schedule_pending). Edits to different sids are buffered and flushed
         independently.
         """
-        from homeassistant.helpers.event import async_call_later
-
         sid_i = int(sid)
         update = {
             "start": _clean4(start) if start is not None else None,
@@ -489,6 +561,38 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             "days": (int(days) & 0x7F) if days is not None else None,
             "max_current": max_current,
         }
+
+        # The pending-buffer merge and timer (re)arm touch loop-owned state
+        # (_pending_schedules, _schedule_flush_handles) and call loop-only HA
+        # APIs (async_call_later, and async_create_task inside _fire). All of
+        # that MUST run on the event loop. async_set_value is already on the
+        # loop, but this method can also be reached from an executor/SyncWorker
+        # thread, where calling these @callback/async_ APIs directly raises a
+        # RuntimeError and the flush coroutine is never awaited. So if we're not
+        # on the loop, marshal the whole staging body onto it thread-safely via
+        # loop.call_soon_threadsafe; if we are on the loop, run it inline so the
+        # debounce/coalesce timing is unchanged.
+        try:
+            on_loop = asyncio.get_running_loop() is self.hass.loop
+        except RuntimeError:
+            on_loop = False
+
+        if on_loop:
+            self._stage_schedule_edit_on_loop(sid_i, update)
+        else:
+            self.hass.loop.call_soon_threadsafe(
+                self._stage_schedule_edit_on_loop, sid_i, update
+            )
+
+    def _stage_schedule_edit_on_loop(self, sid_i: int, update: dict) -> None:
+        """Merge a staged edit and (re)arm the per-sid debounced flush.
+
+        MUST run on the event loop: it mutates loop-owned buffers and calls the
+        loop-only async_call_later / async_create_task APIs. Callers marshal
+        here from off-loop threads via loop.call_soon_threadsafe.
+        """
+        from homeassistant.helpers.event import async_call_later
+
         self._pending_schedules[sid_i] = merge_schedule_pending(
             self._pending_schedules.get(sid_i), update
         )
@@ -501,8 +605,15 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             handle()  # async_call_later returns a cancel callback
 
         def _fire(_now) -> None:
+            # Dispatch the flush via hass.add_job rather than async_create_task.
+            # add_job is thread-safe: it schedules the coroutine on the event
+            # loop regardless of which thread invokes the callback. Observed on
+            # HA 2026 / Python 3.14: this timer callback can run in an executor
+            # thread, where the loop-only async_create_task raises a hard
+            # RuntimeError and the flush coroutine is never awaited (so a staged
+            # schedule edit silently reverts to "unknown"). add_job avoids that.
             self._schedule_flush_handles.pop(sid_i, None)
-            self.hass.async_create_task(self._flush_schedule(sid_i))
+            self.hass.add_job(self._flush_schedule, sid_i)
 
         self._schedule_flush_handles[sid_i] = async_call_later(
             self.hass, SCHEDULE_FLUSH_DELAY, _fire
@@ -656,25 +767,93 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             self.async_set_updated_data(new_data)
 
         if not ok:
-            _LOGGER.warning(
-                "Schedule write to slot %s may not have applied (read back: %s)",
-                sid_i, slot,
-            )
+            if not self._client.ready:
+                # The link dropped during the write/read-back. The user confirms
+                # these writes DO land on the charger; the read-back just didn't
+                # survive the transient drop. Treat this as a transient event:
+                # reconcile on the next successful poll instead of logging a
+                # scary "may not have applied" warning as if the write failed.
+                _LOGGER.debug(
+                    "Schedule write to slot %s: link dropped before read-back "
+                    "could confirm; will reconcile on next poll", sid_i,
+                )
+                self.hass.add_job(self.async_request_refresh)
+            else:
+                # Link is up but the read-back genuinely disagrees — worth a warn.
+                _LOGGER.warning(
+                    "Schedule write to slot %s may not have applied (read back: %s)",
+                    sid_i, slot,
+                )
         return {"ok": ok, "slot": slot}
 
     async def async_delete_schedule(self, sid: int) -> dict | None:
-        """Delete one schedule slot and compact the remaining ones down.
+        """Delete one schedule slot — NATIVE clr_sch first, rewrite as fallback.
 
-        This firmware has NO per-slot delete BAPI method: `clr_sch` is rejected
-        ("No dispatch method found") in every parameter shape, and `s_sch`/
-        advanced-schedule writes are unsupported too. The only working mutation
-        is `w_sch` (write one slot by position). So we replicate what the
-        Wallbox app does over BLE for a charger without the delete command:
-        rewrite the schedule table with the target removed.
+        The official Wallbox app deletes a single slot over BLE with a dedicated
+        command: method `clr_sch` with par `{"sid":[<id>]}` (sid is a JSON ARRAY
+        of integer slot ids; one element to delete one slot). This is a single
+        round-trip and, unlike the compaction rewrite below, does not fire a
+        burst of w_sch writes that destabilises this charger's single BLE link.
 
-        Algorithm (all under ONE lock hold so a poll can't interleave):
+        Because a PRIOR attempt in this integration concluded clr_sch was
+        unsupported (it used the WRONG parameter shape — a scalar sid, never the
+        array form), clr_sch support on this firmware is unproven until the user
+        field-tests it. So this is TRY-NATIVE-THEN-FALLBACK:
+
+          1. Send clr_sch with par {"sid":[sid]} and read r_schs back in ONE lock
+             hold (request_many — same atomic write+read-back pattern w_sch uses).
+          2. If the read-back confirms the slot is GONE -> success. Publish the
+             fresh schedules and return. clr_sch may send NO ack (like w_sch), so
+             success is decided by the read-back (clr_sch_succeeded), NEVER by the
+             response.
+          3. If clr_sch did NOT take (slot still present, link dropped, or an
+             explicit error / code 7 / "No dispatch method found" response) ->
+             FALL BACK to the rewrite-the-whole-table compaction below.
+
+        The fallback is kept intact so delete still works if clr_sch is rejected.
+        """
+        sid_i = int(sid)
+
+        # 1. NATIVE attempt: clr_sch {"sid":[sid]} + r_schs read-back, atomically.
+        if self._client.ready:
+            par = bapi.build_clr_sch_par(sid_i)
+            _LOGGER.debug("Deleting slot %s natively: clr_sch par=%s", sid_i, par)
+            clr_resp, schedules = await self._client.request_many(
+                [(bapi.MET_DEL_SCHED, par), (bapi.MET_GET_SCHEDULES, "null")]
+            )
+            after = (schedules or {}).get("schedules", []) if schedules else []
+            # Success is read-back driven, not ack driven. clr_resp is logged
+            # only for diagnostics (it may be None, or an error object).
+            if clr_sch_succeeded(after, sid_i):
+                _LOGGER.debug(
+                    "Native clr_sch deleted slot %s (resp=%s)", sid_i, clr_resp
+                )
+                if after and self.data is not None:
+                    new_data = dict(self.data)
+                    new_data["schedules"] = after
+                    self.async_set_updated_data(new_data)
+                return {"ok": True, "schedules": after, "method": "clr_sch"}
+            _LOGGER.debug(
+                "Native clr_sch did not delete slot %s (resp=%s, read back: %s); "
+                "falling back to rewrite-the-table compaction",
+                sid_i, clr_resp, after,
+            )
+
+        # 2. FALLBACK: rewrite-the-whole-table compaction (the proven path).
+        return await self._rewrite_delete_schedule(sid_i)
+
+    async def _rewrite_delete_schedule(self, sid: int) -> dict | None:
+        """Fallback delete: rewrite the schedule table with the target removed.
+
+        Used when native clr_sch is rejected or doesn't take. The only working
+        mutation on such firmware is `w_sch` (write one slot by position), so we
+        replicate what the Wallbox app does for a charger without the delete
+        command: rewrite the surviving slots compacted down.
+
+        Algorithm:
           1. Read the current schedules.
-          2. Drop the slot with the given sid, keep the rest in order.
+          2. Drop the slot with the given sid, keep the rest in order
+             (plan_delete_compaction — pure, unit-tested).
           3. Re-write the survivors into positions 0,1,2,... with w_sch, so the
              list is compacted (no gap left where the deleted slot was).
           4. Any trailing position that WAS occupied but now isn't gets cleared
@@ -682,9 +861,20 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
              charger never triggers — the closest thing to "empty" w_sch gives).
           5. Read the schedules back and report what remains.
 
+        PACING (stability fix): each w_sch is issued as its OWN atomic write
+        round-trip, with a SCHEDULE_WRITE_PACING gap between consecutive writes.
+        Previously the whole burst (every survivor + every trailing clear + a
+        read-back) was issued inside ONE unbroken request_many lock hold with no
+        yield, which hammered this charger's single BLE link and dropped it
+        mid-operation — the writes landed, but the link fell over before the
+        read-back, so entities briefly went "unknown". Releasing the lock and
+        sleeping between writes gives the single link (and the poll loop)
+        breathing room. This is GENTLER, not more aggressive (no timeout/pairing
+        changes) — see docs/ble-protocol.md. The outcome is unchanged: the same
+        compacted rewrite is sent in the same order.
+
         Times/days of the surviving slots are preserved exactly as the charger
-        stored them (UTC HHMM, Sunday-first day bitmask), so we pass them
-        through with days_are_sunfirst=True to avoid re-converting.
+        stored them (UTC HHMM, Sunday-first day bitmask).
         """
         import json
 
@@ -702,39 +892,37 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             _LOGGER.debug("Delete slot %s: slot not present, nothing to do", sid_i)
             return {"ok": True, "schedules": before}
 
-        # 2. Survivors, in their existing order, minus the target.
-        survivors = [s for s in before if int(s.get("sid", -1)) != sid_i]
-
-        # 3. Build the compacted rewrite: survivor k -> position k.
-        calls: list[tuple[str, str]] = []
-        for pos, s in enumerate(survivors):
-            start_s = _clean4(s.get("start"))
-            stop_s = _clean4(s.get("stop"))
-            # Days come back from the charger already Sunday-first; keep as-is.
-            sun_first = int(s.get("days", 127)) & 0x7F
-            packed = f"{pos:d}{start_s}{stop_s}{sun_first:03d}"
-            calls.append(("w_sch", json.dumps(packed)))
-
-        # 4. Clear any trailing positions that were occupied before but are no
-        #    longer needed (we now use positions 0..len(survivors)-1). Writing
-        #    days=0 leaves an inert slot the charger never fires.
-        highest_before = max(occupied_before)
-        for pos in range(len(survivors), highest_before + 1):
-            packed = f"{pos:d}00000000000"  # start 0000, stop 0000, days 000
-            calls.append(("w_sch", json.dumps(packed)))
-
-        # 5. Append a final read-back so everything happens under one lock hold.
-        calls.append((bapi.MET_GET_SCHEDULES, "null"))
+        # 2+3+4. Plan the compacted rewrite (survivors renumbered contiguously,
+        # plus clears for trailing positions). Pure helper — unit-tested.
+        plan = plan_delete_compaction(before, sid_i)
+        survivor_count = sum(1 for p in plan if p[3] & 0x7F)
 
         _LOGGER.debug(
-            "Delete slot %s: rewriting %s survivor(s), clearing positions %s..%s",
-            sid_i, len(survivors), len(survivors), highest_before,
+            "Delete slot %s: rewriting %s survivor(s), %s write(s) total, paced "
+            "%.2fs apart",
+            sid_i, survivor_count, len(plan), SCHEDULE_WRITE_PACING,
         )
-        results = await self._client.request_many(calls)
-        schedules = results[-1] if results else None
+
+        # Issue each w_sch as its OWN atomic round-trip, pacing between them so
+        # the single BLE link isn't hammered by the whole burst at once. The
+        # lock is released between writes, so a poll can slip in and the link
+        # gets breathing room — the fix that stops the delete dropping the link.
+        for i, (pos, start_s, stop_s, sun_first) in enumerate(plan):
+            if i > 0:
+                await asyncio.sleep(SCHEDULE_WRITE_PACING)
+            packed = f"{pos:d}{start_s}{stop_s}{sun_first:03d}"
+            await self._client.request("w_sch", json.dumps(packed))
+
+        # 5. Read the schedules back (separate round-trip, after a final gap so
+        #    the read-back doesn't ride the heels of the last write).
+        if plan:
+            await asyncio.sleep(SCHEDULE_WRITE_PACING)
+        schedules = await self._client.request(bapi.MET_GET_SCHEDULES)
 
         after = (schedules or {}).get("schedules", [])
-        if self.data is not None:
+        if after and self.data is not None:
+            # Only push a fresh read when we actually got one back; don't blank
+            # the schedules if the read-back missed because of a transient drop.
             new_data = dict(self.data)
             new_data["schedules"] = after
             self.async_set_updated_data(new_data)
@@ -743,12 +931,26 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         after_active = [s for s in after if int(s.get("days", 0)) & 0x7F]
         gone = all(int(s.get("sid", -1)) != sid_i or not (int(s.get("days", 0)) & 0x7F)
                    for s in after)
-        ok = gone and len(after_active) == len(survivors)
+        ok = gone and len(after_active) == survivor_count
+
         if not ok:
-            _LOGGER.warning(
-                "Delete slot %s may not have fully applied (read back: %s)",
-                sid_i, after,
-            )
+            if not self._client.ready:
+                # The link dropped mid-delete (the write(s) landed, but the
+                # read-back couldn't complete). This is NOT a failure — the next
+                # successful poll reconciles the real schedule state. Ask for a
+                # refresh once the link is back rather than logging a scary
+                # warning for what is a transient drop.
+                _LOGGER.debug(
+                    "Delete slot %s: link dropped before read-back could confirm; "
+                    "will reconcile on next poll", sid_i,
+                )
+                self.hass.add_job(self.async_request_refresh)
+            else:
+                # Link is up but the read-back genuinely disagrees — worth a warn.
+                _LOGGER.warning(
+                    "Delete slot %s may not have fully applied (read back: %s)",
+                    sid_i, after,
+                )
         return {"ok": ok, "schedules": after}
 
     async def async_shutdown(self) -> None:
