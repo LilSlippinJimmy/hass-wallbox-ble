@@ -92,10 +92,10 @@ dead characteristic while the background task reconnects.
 ## Status-code enums
 
 The charger reports its state as small integer enums in the BAPI payloads. The
-tables below were recovered by inspecting the official Wallbox Android app and
-then confirmed against live readings from this charger. They are protocol facts,
-not copied code; the integration carries only the numeric values and plain-text
-labels it needs.
+tables below document the numeric codes and the plain-text meaning the
+integration assigns to each, as observed in this charger's live BAPI responses.
+They are protocol facts (numeric values and labels), not copied code; the
+integration carries only the values and labels it needs.
 
 ### Charger status (`r_dat.st` / `r_sta.charger_status`)
 

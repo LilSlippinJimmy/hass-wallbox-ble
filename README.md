@@ -366,9 +366,13 @@ BLE protocol:
 
 - [`botts7/esp32-wallbox`](https://github.com/botts7/esp32-wallbox) — the BAPI
   framing/checksum and method-name reference.
+- [`jagheterfredrik/wallbox-ble`](https://github.com/jagheterfredrik/wallbox-ble)
+  — the BLE pairing-agent (NoInputNoOutput BlueZ Agent1) and persistent-connection
+  approach.
 
-The BAPI framing/checksum logic adapted from that project is a Python port for
-Home Assistant's Bluetooth stack; its MIT notice ships in `THIRD_PARTY_LICENSES`.
+Both projects are MIT licensed; their notices ship in `THIRD_PARTY_LICENSES`.
+The BAPI framing/checksum logic adapted from `botts7/esp32-wallbox` is a Python
+port for Home Assistant's Bluetooth stack.
 
 ## License
 

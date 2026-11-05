@@ -54,7 +54,7 @@ set_schedule:
       selector:
         number:
           min: 0
-          max: 4
+          max: 3
           mode: box
     days:
       name: Days
@@ -123,7 +123,7 @@ set_schedule_full:
       selector:
         number:
           min: 0
-          max: 4
+          max: 3
           mode: box
     days:
       name: Days
@@ -169,13 +169,13 @@ delete_schedule:
   fields:
     sid:
       name: Schedule slot
-      description: Which schedule slot to delete (0-4).
+      description: Which schedule slot to delete (0-3).
       required: true
       example: 1
       selector:
         number:
           min: 0
-          max: 4
+          max: 3
           mode: box
     device_id:
       name: Charger

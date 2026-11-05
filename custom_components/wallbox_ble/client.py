@@ -6,13 +6,14 @@ when a NoInputNoOutput BlueZ agent is registered to auto-accept the pairing
 authorization (a bare client.pair() yields org.bluez.Error.AuthenticationFailed
 because no agent answers the Just-Works authorization request).
 
-This is the integration's own implementation. The pairing-agent registration
-and the connection loop are derived from first-party API references — the BlueZ
-D-Bus agent API (`org.bluez.AgentManager1` / `org.bluez.Agent1`), the dbus-fast
-library's ServiceInterface/@method export API, and the bleak /
-bleak-retry-connector connect lifecycle — not from any third-party integration.
-The GATT UUIDs and BAPI protocol facts below are verified against this charger.
-See docs/ble-protocol.md for the connection/encryption model this code follows.
+The pairing-agent registration (the NoInputNoOutput BlueZ Agent1 approach) and
+the persistent-connection pattern are modelled on jagheterfredrik/wallbox-ble
+(MIT licensed; its notice ships in THIRD_PARTY_LICENSES), built against the
+BlueZ D-Bus agent API (`org.bluez.AgentManager1` / `org.bluez.Agent1`), the
+dbus-fast ServiceInterface/@method export API, and the bleak /
+bleak-retry-connector connect lifecycle. The GATT UUIDs and BAPI protocol facts
+below are verified against this charger. See docs/ble-protocol.md for the
+connection/encryption model this code follows.
 
 Connection model (persistent):
   A single background asyncio task (`_run`) owns the BLE link for the lifetime
