@@ -4,6 +4,15 @@ All notable changes to this project are documented here.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.4.5]
+### Fixed
+- Entities no longer flap to unavailable (and back) during brief Bluetooth
+  reconnects, which was creating duplicate history entries for every entity
+  at once — even static ones like OCPP Status — and could fire spurious
+  state-change automations. The coordinator now keeps serving the last-known
+  data for up to ~2 minutes of continuously failed polls before marking
+  entities unavailable; a genuine sustained outage still shows unavailable.
+
 ## [0.3.0]
 ### Fixed
 - **BLE link stability (major).** The integration no longer force-pairs the

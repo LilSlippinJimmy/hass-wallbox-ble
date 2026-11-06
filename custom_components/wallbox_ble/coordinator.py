@@ -4,11 +4,12 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from . import bapi
 from .client import WallboxBleClient
@@ -102,6 +103,14 @@ SCHEDULE_WRITE_READY_TIMEOUT = 9.0
 # kind of aggression). A single lone write (async_set_schedule for one slot) is
 # one round-trip and does not need this gap.
 SCHEDULE_WRITE_PACING = 0.4
+
+# How long to keep serving the last-known data (entities stay available) through
+# continuously-failing polls before marking everything unavailable. A brief BLE
+# blip / normal reconnect rides through within this window, so entities do NOT
+# flap available -> unavailable -> available and HA does NOT record a fresh
+# history segment of the (unchanged) value for every entity at once. A genuine
+# sustained outage still goes unavailable once polls fail for longer than this.
+TOLERATE_OFFLINE_WINDOW = timedelta(minutes=2)
 
 
 def merge_schedule_pending(existing: dict | None, update: dict) -> dict:
@@ -219,10 +228,13 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         # thin poller that checks `ready` and funnels every op through it.
         self._client = WallboxBleClient(hass, address)
         # Tolerate transient BLE contention (phone app grabbing the single BLE
-        # slot) — keep serving the last-known data for a few failed cycles
-        # instead of blanking every entity to "unavailable" on one miss.
-        self._consecutive_failures = 0
-        self._max_tolerated_failures = 3
+        # slot) / brief reconnects — keep serving the last-known data instead of
+        # blanking every entity to "unavailable" on a miss. The tolerance is a
+        # wall-clock window (TOLERATE_OFFLINE_WINDOW): this marks the start of
+        # the current continuous outage (None when the last poll succeeded), so
+        # we measure how long polls have been failing in a row rather than
+        # counting cycles.
+        self._first_failure_at: datetime | None = None
         # Static info (firmware, MAC, OCPP flag, serial) is read ONCE, the
         # first time the link is ready, then cached and merged into every
         # poll's data. These values don't change at runtime, so re-reading
@@ -371,9 +383,9 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self) -> dict:
         # The client's background task owns reconnection (with back-off), so the
         # poll never drives the link here. If the link isn't ready, or a read
-        # came back empty, keep serving the last-known data for a few cycles
-        # (transient BLE contention is normal) before marking entities
-        # unavailable.
+        # came back empty, keep serving the last-known data through a brief
+        # outage (transient BLE contention is normal) before marking entities
+        # unavailable — see _tolerate_or_fail / TOLERATE_OFFLINE_WINDOW.
         if not self._client.ready:
             return self._tolerate_or_fail("BLE link not connected (reconnecting)")
 
@@ -383,7 +395,8 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
             return self._tolerate_or_fail(f"Error polling Wallbox over BLE: {err}")
 
         if result is not None:
-            self._consecutive_failures = 0
+            # A successful poll ends any ongoing outage window.
+            self._first_failure_at = None
             return result
 
         return self._tolerate_or_fail(
@@ -391,20 +404,30 @@ class WallboxBleCoordinator(DataUpdateCoordinator):
         )
 
     def _tolerate_or_fail(self, message: str) -> dict:
-        """On a failed poll, keep serving the last-known data for a few cycles
-        (transient BLE contention is normal) and only raise UpdateFailed — which
-        marks entities unavailable — once failures persist."""
-        self._consecutive_failures += 1
+        """On a failed poll, keep serving the last-known data for up to
+        TOLERATE_OFFLINE_WINDOW of continuously-failing polls (a brief BLE blip
+        / normal reconnect is normal) and only raise UpdateFailed — which marks
+        entities unavailable — once the outage has lasted longer than that. The
+        time-based window stops entities flapping available/unavailable on short
+        dropouts, which was logging duplicate history segments for every entity
+        at once; a genuine sustained outage still goes unavailable."""
         # On the very first refresh the link may still be coming up on the
         # background task. Don't fail setup over that — start with empty data
-        # and let the first successful poll fill it in.
+        # and let the first successful poll fill it in. Do NOT start the outage
+        # timer here: there is no last-known data to preserve, and the window
+        # must only measure outages that began after we had real data.
         if self.data is None:
             _LOGGER.debug("%s (link still establishing; serving empty data)", message)
             return {}
-        if self._consecutive_failures <= self._max_tolerated_failures:
+        now = dt_util.utcnow()
+        if self._first_failure_at is None:
+            self._first_failure_at = now
+        elapsed = now - self._first_failure_at
+        if elapsed <= TOLERATE_OFFLINE_WINDOW:
             _LOGGER.debug(
-                "%s (keeping last data, failure %s/%s)",
-                message, self._consecutive_failures, self._max_tolerated_failures,
+                "%s (keeping last data, offline %ss/%ss)",
+                message, int(elapsed.total_seconds()),
+                int(TOLERATE_OFFLINE_WINDOW.total_seconds()),
             )
             return self.data
         raise UpdateFailed(message)

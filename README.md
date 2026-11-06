@@ -347,6 +347,13 @@ app renumbers.
 - **Entities show "unavailable":** the link may be establishing or the phone app
   may be holding it. The integration reconnects automatically with back-off;
   closing the Wallbox app usually helps.
+- **Brief Bluetooth dropouts don't blank the entities.** The integration keeps
+  serving the last-known state through short reconnects (up to ~2 minutes of
+  continuously failed polls), so a quick blip does not flap entity availability
+  or create duplicate history entries / spurious state-change automations. If
+  the charger is genuinely offline for longer than ~2 minutes, the entities
+  become unavailable as expected. If dropouts are frequent, add an ESPHome
+  Bluetooth proxy near the charger for a stronger link.
 - **Writes/schedules don't apply:** confirm the charger is in BLE range and the
   app isn't connected. With more than one charger configured, make sure the
   schedule service call targets the right one via `device_id`.
